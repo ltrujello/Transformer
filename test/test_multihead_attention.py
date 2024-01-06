@@ -1,6 +1,13 @@
 import pytest
 import torch
-from transformer.transformer import MultiheadAttention, split_heads, attention
+from transformer.transformer import (
+    MultiheadAttention,
+    split_heads,
+    attention,
+    positional_encoding,
+    subsequent_mask,
+    Transformer,
+)
 
 
 @pytest.fixture
@@ -8,7 +15,33 @@ def multihead_attention_instance():
     # Assuming you have a MultiheadAttention class
     d_model = 4
     num_heads = 2
-    return MultiheadAttention(d_model, num_heads)
+    return MultiheadAttention(d_model, num_heads, dropout=0)
+
+
+@pytest.fixture
+def transformer_instance():
+    # Assuming you have a MultiheadAttention class
+    num_encoder_stacks = 6
+    num_decoder_stacks = 6
+    num_encoder_heads = 2
+    num_decoder_heads = 2
+    src_vocab_size = 100
+    tgt_vocab_size = 100
+    d_model = 4
+    d_ff = 10
+    max_seq_len = 10
+
+    return Transformer(
+        num_encoder_stacks,
+        num_decoder_stacks,
+        num_encoder_heads,
+        num_decoder_heads,
+        src_vocab_size,
+        tgt_vocab_size,
+        d_model,
+        d_ff,
+        max_seq_len,
+    )
 
 
 @pytest.fixture
@@ -65,6 +98,18 @@ def query_key_value():
     )
 
     return Q, K, V
+
+
+@pytest.fixture
+def mock_positional_encoding():
+    return torch.tensor(
+        [
+            [0.0000, 1.0000, 0.0000, 1.0000],
+            [0.8415, 0.5403, 0.0100, 0.9999],
+            [0.9093, -0.4161, 0.0200, 0.9998],
+            [0.1411, -0.9900, 0.0300, 0.9996],
+        ]
+    )
 
 
 def test_split_heads(query_key_value):
@@ -158,6 +203,71 @@ def test_multihead_attention_calc(multihead_attention_instance, query_key_value)
         ).item()
         < 1e-5
     )
+
+
+def test_positional_encoding(mock_positional_encoding):
+    encoding = positional_encoding(4, 4)
+    print(encoding)
+    assert torch.sum(encoding - mock_positional_encoding) < 1e-6
+
+
+def test_subsequent_mask():
+    assert torch.all(
+        torch.tensor(
+            [
+                [
+                    [True, False, False, False],
+                    [True, True, False, False],
+                    [True, True, True, False],
+                    [True, True, True, True],
+                ]
+            ]
+        )
+        == subsequent_mask(4)
+    ), "Upper triangular masking failed"
+
+
+def test_masked_attention():
+    batch_size = 2
+    seq_len = 10
+    d_model = 5
+    Q = torch.rand(size=(batch_size, seq_len, d_model))
+    K = torch.rand(size=(batch_size, seq_len, d_model))
+    V = torch.rand(size=(batch_size, seq_len, d_model))
+    mask = subsequent_mask(seq_len)
+    attn_vals, attn_weights = attention(Q, K, V, mask=mask)
+    upper_triangular = attn_weights.squeeze(1).triu(diagonal=1)
+    assert torch.all(upper_triangular == 0), "Attention weights aren't masked"
+
+
+def test_masked_multihead_attention(multihead_attention_instance):
+    batch_size = 5
+    seq_len = 10
+    d_model = 4
+
+    Q = torch.rand(size=(batch_size, seq_len, d_model))
+    K = torch.rand(size=(batch_size, seq_len, d_model))
+    V = torch.rand(size=(batch_size, seq_len, d_model))
+    mask = subsequent_mask(seq_len)
+
+    attn_vals, attn_weights = multihead_attention_instance(Q, K, V, mask=mask)
+    upper_triangular = attn_weights.squeeze(1).triu(diagonal=1)
+    assert torch.all(upper_triangular == 0), "Attention weights aren't masked"
+
+
+def test_transformer_smoke_test(transformer_instance, query_key_value):
+    batch_size = 2
+    sequence_length = 10
+    input = torch.randint(high=10, size=(batch_size, sequence_length))
+    tgt = torch.randint(high=10, size=(batch_size, sequence_length))
+
+    src_mask = torch.randint(
+        0, 2, size=(batch_size, sequence_length, sequence_length)
+    ).bool()
+    tgt_mask = torch.randint(
+        0, 2, size=(batch_size, sequence_length, sequence_length)
+    ).bool()
+    transformer_instance.forward(input, tgt, src_mask, tgt_mask)
 
 
 if __name__ == "__main__":
