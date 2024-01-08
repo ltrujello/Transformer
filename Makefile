@@ -7,7 +7,7 @@ black:
 
 .PHONY: lint
 lint:
-	ruff check src/*.py        
+	ruff check src/transformer/*.py        
 
 .PHONY: test
 test:

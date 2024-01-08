@@ -343,11 +343,7 @@ class Transformer(nn.Module):
 
         # Initialize params with Glorot / fan_avg?
 
-    def forward(self, src, tgt, src_mask, tgt_mask):
-        LOGGER.debug(
-            f"computing forward pass with {src.size()=} "
-            f"{tgt.size()=} {src_mask.size()=} {tgt_mask.size()=}"
-        )
+    def encode(self, src, src_mask):
         # Embed inputs, add position encoding, apply dropout
         src = self.src_embedding(src)
         src = src + self.positional_encoder[: src.size(1)]
@@ -356,7 +352,9 @@ class Transformer(nn.Module):
 
         # Encode the source sequence
         enc_output = self.encoder(src, src_mask)
+        return enc_output
 
+    def decode(self, tgt, enc_output, tgt_mask, src_mask):
         # Embed targets, add position encoding, apply dropout
         tgt = self.tgt_embedding(tgt)
         tgt = tgt + self.positional_encoder[: tgt.size(1)]
@@ -364,6 +362,16 @@ class Transformer(nn.Module):
 
         # Decode the target sequence using the encoder output
         dec_output = self.decoder(tgt, enc_output, tgt_mask, src_mask)
+        return dec_output
+
+    def forward(self, src, tgt, src_mask, tgt_mask):
+        LOGGER.debug(
+            f"computing forward pass with {src.size()=} "
+            f"{tgt.size()=} {src_mask.size()=} {tgt_mask.size()=}"
+        )
+
+        enc_output = self.encode(src, src_mask)
+        dec_output = self.decode(tgt, enc_output, tgt_mask, src_mask)
 
         # Compute output layer
         output = self.output_layer(dec_output)
@@ -372,9 +380,3 @@ class Transformer(nn.Module):
         return output
 
 
-# figure out masking
-# encoder needs masking because we pad the sequences
-# decoder needs masking because otherwise we would have to feed the
-# decoder the target sequence on element at a time. To parallelize this,
-# we need to perform masking.
-# train

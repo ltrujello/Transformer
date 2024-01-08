@@ -268,6 +268,7 @@ def test_transformer_smoke_test(transformer_instance, query_key_value):
         0, 2, size=(batch_size, sequence_length, sequence_length)
     ).bool()
     transformer_instance.forward(input, tgt, src_mask, tgt_mask)
+    assert True
 
 
 if __name__ == "__main__":
