@@ -32,15 +32,15 @@ def transformer_instance():
     max_seq_len = 10
 
     return Transformer(
-        num_encoder_stacks,
-        num_decoder_stacks,
-        num_encoder_heads,
-        num_decoder_heads,
-        src_vocab_size,
-        tgt_vocab_size,
-        d_model,
-        d_ff,
-        max_seq_len,
+        num_encoder_stacks=num_encoder_stacks,
+        num_decoder_stacks=num_decoder_stacks,
+        src_vocab_size=src_vocab_size,
+        tgt_vocab_size=tgt_vocab_size,
+        d_model=d_model,
+        d_ffn=d_ff,
+        num_encoder_heads=num_encoder_heads,
+        num_decoder_heads=num_decoder_heads,
+        max_seq_len=max_seq_len,
     )
 
 
@@ -269,6 +269,35 @@ def test_transformer_smoke_test(transformer_instance, query_key_value):
     ).bool()
     transformer_instance.forward(input, tgt, src_mask, tgt_mask)
     assert True
+
+
+def test_transformer_fake_data():
+    test_model = Transformer(
+        num_encoder_stacks=6, num_decoder_stacks=6, src_vocab_size=11, tgt_vocab_size=11
+    )
+    test_model.eval()
+    src = torch.LongTensor([[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]])
+    src_mask = torch.ones(1, 1, 10)
+
+    tgt = torch.zeros(1, 1).type_as(src)
+    tgt_mask = subsequent_mask(tgt.size(1)).type_as(src.data)
+
+    for i in range(9):
+        print(i)
+        prob = test_model.forward(
+            src=src,
+            tgt=tgt,
+            src_mask=src_mask,
+            tgt_mask=tgt_mask,
+        )
+        _, next_word = torch.max(prob[:, -1], dim=1)
+        next_word = next_word.data[0]
+        print(next_word)
+        tgt = torch.cat(
+            [tgt, torch.empty(1, 1).type_as(src.data).fill_(next_word)], dim=1
+        )
+
+    print("Example Untrained Model Prediction:", tgt)
 
 
 if __name__ == "__main__":

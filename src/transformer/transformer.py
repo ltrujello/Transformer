@@ -75,10 +75,10 @@ def attention(Q, K, V, dropout=None, mask=None):
     dk = Q.size(-1)
 
     # Compute attention
-    scale = torch.sqrt(torch.FloatTensor([dk])).to(device)
+    scale = torch.sqrt(torch.tensor(dk)).to(device)
     attention_scores = torch.matmul(Q, K.transpose(-2, -1)) / scale
 
-    # Apply attention mask (if provided)
+    # Apply attention mask (if provided).
     if mask is not None:
         LOGGER.debug(f"Applying {mask.size()=} to {attention_scores.size()=}")
         attention_scores = attention_scores.masked_fill(mask == 0, float("-inf"))
@@ -88,6 +88,7 @@ def attention(Q, K, V, dropout=None, mask=None):
         attention_weights = dropout(attention_weights)
 
     # Calculate the weighted sum of values
+    LOGGER.debug(f"Attempting to multiply {attention_weights.size()=} with {V.size()=}")
     attended_values = torch.matmul(attention_weights, V)
 
     return attended_values, attention_weights
@@ -158,12 +159,17 @@ class EncoderLayer(nn.Module):
     def __init__(self, d_model, num_heads, d_ffn, dropout=0.1):
         super(EncoderLayer, self).__init__()
 
+        # Self-attention sub-layer
         self.self_attention = MultiheadAttention(d_model, num_heads, dropout=dropout)
+
+        # Position-wise feedforward sub-layer
         self.feedforward = PositionwiseFeedForward(d_model, d_ffn, dropout=dropout)
 
+        # Layer Normalization
         self.norm1 = LayerNorm(d_model)
         self.norm2 = LayerNorm(d_model)
 
+        # Dropout
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x, mask=None):
@@ -182,6 +188,10 @@ class EncoderLayer(nn.Module):
 
 
 class DecoderLayer(nn.Module):
+    """
+    Implements a single Decoder layer with pre-layer normalization.
+    """
+
     def __init__(self, d_model, num_heads, d_ffn, dropout=0.1):
         super(DecoderLayer, self).__init__()
 
@@ -212,8 +222,9 @@ class DecoderLayer(nn.Module):
 
         # Encoder-Decoder attention sub-layer
         x_norm = self.norm2(x)
+        encoder_output_norm = self.norm2(x)
         encoder_attention_output, _ = self.encoder_attention(
-            encoder_output, encoder_output, x_norm, mask=encoder_mask
+            encoder_output_norm, encoder_output_norm, x_norm, mask=encoder_mask
         )
         x = x + self.dropout(encoder_attention_output)
 
@@ -248,7 +259,7 @@ class Encoder(nn.Module):
 
 
 class Decoder(nn.Module):
-    "Class for encoder, which consists of N-many DecoderLayers"
+    "Class for decoder, which consists of N-many DecoderLayers"
 
     def __init__(self, num_stacks, d_model, num_heads, d_ffn, dropout=0.1):
         super(Decoder, self).__init__()
@@ -320,13 +331,13 @@ class Transformer(nn.Module):
         self,
         num_encoder_stacks,
         num_decoder_stacks,
-        num_encoder_heads,
-        num_decoder_heads,
         src_vocab_size,
         tgt_vocab_size,
-        d_model,
-        d_ffn,
-        max_seq_len,
+        d_model=512,
+        d_ffn=2048,
+        num_encoder_heads=8,
+        num_decoder_heads=8,
+        max_seq_len=100,
         dropout=0.1,
     ):
         super(Transformer, self).__init__()
@@ -376,7 +387,7 @@ class Transformer(nn.Module):
         # Compute output layer
         output = self.output_layer(dec_output)
         output = torch.softmax(output, dim=-1)
+        LOGGER.debug(f"Returning {output=} of {output.size()=}")
 
         return output
-
 
