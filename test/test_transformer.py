@@ -5,7 +5,7 @@ from transformer.transformer import (
     split_heads,
     attention,
     positional_encoding,
-    subsequent_mask,
+    future_mask,
     Transformer,
 )
 
@@ -211,7 +211,7 @@ def test_positional_encoding(mock_positional_encoding):
     assert torch.sum(encoding - mock_positional_encoding) < 1e-6
 
 
-def test_subsequent_mask():
+def test_future_mask():
     assert torch.all(
         torch.tensor(
             [
@@ -223,24 +223,41 @@ def test_subsequent_mask():
                 ]
             ]
         )
-        == subsequent_mask(4)
+        == future_mask(4)
     ), "Upper triangular masking failed"
 
 
-def test_masked_attention():
+def test_attention_future_masking():
     batch_size = 2
     seq_len = 10
     d_model = 5
     Q = torch.rand(size=(batch_size, seq_len, d_model))
     K = torch.rand(size=(batch_size, seq_len, d_model))
     V = torch.rand(size=(batch_size, seq_len, d_model))
-    mask = subsequent_mask(seq_len)
+    mask = future_mask(seq_len)
     attn_vals, attn_weights = attention(Q, K, V, mask=mask)
     upper_triangular = attn_weights.squeeze(1).triu(diagonal=1)
     assert torch.all(upper_triangular == 0), "Attention weights aren't masked"
 
 
-def test_masked_multihead_attention(multihead_attention_instance):
+def test_attention_padding_masking():
+    batch_size = 2
+    seq_len = 10
+    d_model = 5
+    Q = torch.rand(size=(batch_size, seq_len, d_model))
+    K = torch.rand(size=(batch_size, seq_len, d_model))
+    V = torch.rand(size=(batch_size, seq_len, d_model))
+    mask = torch.ones(batch_size, 1, seq_len).bool()
+    mask[:, :, -1] = False
+    mask[:, :, 5] = False
+
+    attn_vals, attn_weights = attention(Q, K, V, mask=mask)
+
+    assert torch.all(attn_weights[:, :, -1] == 0)
+    assert torch.all(attn_weights[:, :, 5] == 0)
+
+
+def test_multihead_attention_future_masking(multihead_attention_instance):
     batch_size = 5
     seq_len = 10
     d_model = 4
@@ -248,25 +265,40 @@ def test_masked_multihead_attention(multihead_attention_instance):
     Q = torch.rand(size=(batch_size, seq_len, d_model))
     K = torch.rand(size=(batch_size, seq_len, d_model))
     V = torch.rand(size=(batch_size, seq_len, d_model))
-    mask = subsequent_mask(seq_len)
+    mask = future_mask(seq_len)
 
     attn_vals, attn_weights = multihead_attention_instance(Q, K, V, mask=mask)
     upper_triangular = attn_weights.squeeze(1).triu(diagonal=1)
     assert torch.all(upper_triangular == 0), "Attention weights aren't masked"
 
 
-def test_transformer_smoke_test(transformer_instance, query_key_value):
+def test_multihead_attention_padding_masking(multihead_attention_instance):
+    batch_size = 5
+    seq_len = 10
+    d_model = 4
+
+    Q = torch.rand(size=(batch_size, seq_len, d_model))
+    K = torch.rand(size=(batch_size, seq_len, d_model))
+    V = torch.rand(size=(batch_size, seq_len, d_model))
+    mask = torch.ones(batch_size, 1, seq_len)
+    mask[:, :, -1] = 0
+    mask[:, :, 5] = 0
+
+    attn_vals, attn_weights = multihead_attention_instance(Q, K, V, mask=mask)
+    print(attn_weights)
+
+    assert torch.all(attn_weights[:, :, :, -1] == 0)
+    assert torch.all(attn_weights[:, :, :, 5] == 0)
+
+
+def test_transformer_smoke_test(transformer_instance):
     batch_size = 2
     sequence_length = 10
     input = torch.randint(high=10, size=(batch_size, sequence_length))
     tgt = torch.randint(high=10, size=(batch_size, sequence_length))
 
-    src_mask = torch.randint(
-        0, 2, size=(batch_size, sequence_length, sequence_length)
-    ).bool()
-    tgt_mask = torch.randint(
-        0, 2, size=(batch_size, sequence_length, sequence_length)
-    ).bool()
+    src_mask = torch.randint(0, 2, size=(batch_size, 1, sequence_length)).bool()
+    tgt_mask = torch.randint(0, 2, size=(1, sequence_length, sequence_length)).bool()
     transformer_instance.forward(input, tgt, src_mask, tgt_mask)
     assert True
 
@@ -277,10 +309,10 @@ def test_transformer_fake_data():
     )
     test_model.eval()
     src = torch.LongTensor([[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]])
-    src_mask = torch.ones(1, 1, 10)
+    src_mask = torch.ones(1, 1, 10).bool()
 
     tgt = torch.zeros(1, 1).type_as(src)
-    tgt_mask = subsequent_mask(tgt.size(1)).type_as(src.data)
+    tgt_mask = future_mask(tgt.size(1))
 
     for i in range(9):
         print(i)

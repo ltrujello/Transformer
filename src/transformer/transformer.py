@@ -34,6 +34,7 @@ class MultiheadAttention(nn.Module):
     def forward(self, Q, K, V, mask=None):
         LOGGER.debug(
             f"Computing multihead attention with {Q.size()=} {K.size()=} {V.size()=}"
+            f" with mask.size()={mask.size() if mask is not None else None}"
         )
         Q = self.W_q(Q)
         K = self.W_k(K)
@@ -88,7 +89,6 @@ def attention(Q, K, V, dropout=None, mask=None):
         attention_weights = dropout(attention_weights)
 
     # Calculate the weighted sum of values
-    LOGGER.debug(f"Attempting to multiply {attention_weights.size()=} with {V.size()=}")
     attended_values = torch.matmul(attention_weights, V)
 
     return attended_values, attention_weights
@@ -174,7 +174,6 @@ class EncoderLayer(nn.Module):
 
     def forward(self, x, mask=None):
         # Multihead self-attention sub-layer
-        LOGGER.debug(f"Computing forward pass of encoder layer with {x.size()=}")
         x_norm = self.norm1(x)
         attention_output, _ = self.self_attention(x_norm, x_norm, x_norm, mask=mask)
         x = x + self.dropout(attention_output)
@@ -222,9 +221,9 @@ class DecoderLayer(nn.Module):
 
         # Encoder-Decoder attention sub-layer
         x_norm = self.norm2(x)
-        encoder_output_norm = self.norm2(x)
+        encoder_output_norm = self.norm2(encoder_output)
         encoder_attention_output, _ = self.encoder_attention(
-            encoder_output_norm, encoder_output_norm, x_norm, mask=encoder_mask
+            x_norm, encoder_output_norm, encoder_output_norm, mask=encoder_mask
         )
         x = x + self.dropout(encoder_attention_output)
 
@@ -300,14 +299,14 @@ def positional_encoding(max_len, d_model):
     return pos_enc
 
 
-def subsequent_mask(d_model):
+def future_mask(sequence_length):
     """
     Creates a lower-triangular n \\times n matrix
     used to mask future positions
     """
-    attn_shape = (1, d_model, d_model)
-    subsequent_mask = torch.triu(torch.ones(attn_shape), diagonal=1).type(torch.uint8)
-    return subsequent_mask == 0
+    attn_shape = (1, sequence_length, sequence_length)
+    future_mask = torch.triu(torch.ones(attn_shape), diagonal=1).type(torch.uint8)
+    return future_mask == 0
 
 
 class Embeddings(nn.Module):
@@ -318,11 +317,7 @@ class Embeddings(nn.Module):
         self.d_model = d_model
 
     def forward(self, x):
-        LOGGER.debug(
-            f"Computing {self.vocab_size=}, {self.d_model=} embedding with {x.size()=}"
-        )
         output = self.lut(x) * torch.sqrt(torch.tensor(self.d_model))
-        LOGGER.debug(f"Computed {output.size()=} embedding")
         return output
 
 
@@ -352,20 +347,25 @@ class Transformer(nn.Module):
         self.src_dropout = nn.Dropout(dropout)
         self.tgt_dropout = nn.Dropout(dropout)
 
-        # Initialize params with Glorot / fan_avg?
-
     def encode(self, src, src_mask):
+        LOGGER.debug(
+            "Computing forward pass of encoder with "
+            f"{src.size()=}, {src_mask.size()=}"
+        )
         # Embed inputs, add position encoding, apply dropout
         src = self.src_embedding(src)
         src = src + self.positional_encoder[: src.size(1)]
         src = self.src_dropout(src)
-        LOGGER.debug(f"Computing forward pass of encoder layer with {src.size()=}")
 
         # Encode the source sequence
         enc_output = self.encoder(src, src_mask)
         return enc_output
 
     def decode(self, tgt, enc_output, tgt_mask, src_mask):
+        LOGGER.debug(
+            "Computing forward pass of decoder with "
+            f"{tgt.size()}, {enc_output.size()=}, {tgt_mask.size()=}, {src_mask.size()=}"
+        )
         # Embed targets, add position encoding, apply dropout
         tgt = self.tgt_embedding(tgt)
         tgt = tgt + self.positional_encoder[: tgt.size(1)]
@@ -375,7 +375,17 @@ class Transformer(nn.Module):
         dec_output = self.decoder(tgt, enc_output, tgt_mask, src_mask)
         return dec_output
 
-    def forward(self, src, tgt, src_mask, tgt_mask):
+    def forward(self, src, tgt, tgt_mask, src_mask):
+        """
+        Forward pass of Transformer.
+
+        - src has size (batch_size, src_seq_len)
+        - tgt has size (batch_size, tgt_seq_len)
+        - src_mask has size (batch_size, 1, seq_len), and
+          prevents attention to padding indices
+        - tgt_mask has size (batch_size, tgt_seq_len, tgt_seq_len), and
+          prevents attention to future positions and padding
+        """
         LOGGER.debug(
             f"computing forward pass with {src.size()=} "
             f"{tgt.size()=} {src_mask.size()=} {tgt_mask.size()=}"
@@ -387,7 +397,5 @@ class Transformer(nn.Module):
         # Compute output layer
         output = self.output_layer(dec_output)
         output = torch.softmax(output, dim=-1)
-        LOGGER.debug(f"Returning {output=} of {output.size()=}")
 
         return output
-
