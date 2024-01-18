@@ -364,7 +364,7 @@ class Transformer(nn.Module):
     def decode(self, tgt, enc_output, tgt_mask, src_mask):
         LOGGER.debug(
             "Computing forward pass of decoder with "
-            f"{tgt.size()}, {enc_output.size()=}, {tgt_mask.size()=}, {src_mask.size()=}"
+            f"{tgt.size()=}, {enc_output.size()=}, {tgt_mask.size()=}, {src_mask.size()=}"
         )
         # Embed targets, add position encoding, apply dropout
         tgt = self.tgt_embedding(tgt)
