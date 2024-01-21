@@ -210,7 +210,7 @@ def train_model(num_epochs, num_batches, batch_size, eval_interval):
         num_batches=num_batches,
     )
 
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(ignore_index=pad_idx)
     optimizer = torch.optim.Adam(
         model.parameters(), lr=0.1, betas=(0.9, 0.98), eps=1e-9
     )
