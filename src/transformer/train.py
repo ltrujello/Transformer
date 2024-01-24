@@ -105,11 +105,13 @@ def build_dataloaders(
         training_data,
         collate_fn=lambda x: collate_fn(x, pad_idx, start_idx, end_idx),
         batch_size=batch_size,
+        shuffle=True,
     )
     test_dataloader = DataLoader(
         test_data,
         collate_fn=lambda x: collate_fn(x, pad_idx, start_idx, end_idx),
         batch_size=batch_size,
+        shuffle=True,
     )
 
     return train_dataloader, test_dataloader
@@ -140,9 +142,11 @@ def compute_tgt_mask(tgt: torch.tensor, padding_value: Optional[int] = None):
     - tgt is a tensor with shape (batch_size, seq_len)
     - output is a tensor with shape (batch_size, seq_len, seq_len)
     """
+    subsequent_mask = future_mask(tgt.size(1))
     if padding_value is None:
-        return future_mask(tgt.size(1))
-    return future_mask(tgt.size(1)) & (tgt != padding_value).unsqueeze(1)
+        return subsequent_mask
+    padding_mask = (tgt != padding_value).unsqueeze(1)
+    return subsequent_mask & padding_mask.view(padding_mask.size(0), -1, 1)
 
 
 class TrainWorker:
@@ -338,14 +342,13 @@ def greedy_translate(model, src, start_token, end_token, padding_token, max_len=
         enc_output = model.encode(src, src_mask)
 
         # Initialize the target sequence with the start token
-        tgt = torch.full((src.size(0), 1), start_token)
+        tgt = torch.full((1, 1), start_token)
 
         for _ in range(max_len):
             # Generate the next token
             tgt_mask = future_mask(tgt.size(1))
             dec_output = model.decode(tgt, enc_output, tgt_mask, src_mask)
             dec_output = model.output_layer(dec_output)
-            dec_output = model.softmax(dec_output)
             next_token = dec_output[:, -1, :].argmax(dim=-1).unsqueeze(1)
 
             # Append the generated token to the target sequence

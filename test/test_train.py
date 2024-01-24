@@ -73,12 +73,29 @@ def test_compute_tgt_mask_no_padding():
 
 
 def test_compute_tgt_mask_with_padding():
-    tgt = torch.tensor([[1, 2, 3], [4, 5, 6]])
-    padding_value = 4
+    tgt = torch.tensor(
+        [
+            [1, 2, 3, 0, 0],  # Sequence 1 (length 3, with padding)
+            [1, 4, 5, 6, 0],  # Sequence 2 (length 4, with padding)
+        ]
+    )
+    padding_value = 0
     tgt_mask = torch.tensor(
         [
-            [[True, False, False], [True, True, False], [True, True, True]],
-            [[False, False, False], [False, True, False], [False, True, True]],
+            [
+                [True, False, False, False, False],
+                [True, True, False, False, False],
+                [True, True, True, False, False],
+                [False, False, False, False, False],
+                [False, False, False, False, False],
+            ],
+            [
+                [True, False, False, False, False],
+                [True, True, False, False, False],
+                [True, True, True, False, False],
+                [True, True, True, True, False],
+                [False, False, False, False, False],
+            ],
         ]
     )
     assert torch.equal(compute_tgt_mask(tgt, padding_value), tgt_mask)
