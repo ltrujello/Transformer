@@ -10,6 +10,8 @@ from torchtext.vocab import build_vocab_from_iterator
 from torch.optim.lr_scheduler import LambdaLR
 from transformer.model import Transformer, future_mask
 from typing import Optional
+import matplotlib.pyplot as plt
+
 
 LOGGER = logging.getLogger(__name__)
 
@@ -168,12 +170,12 @@ class TrainWorker:
         self.start_idx: int = src_vocab["<sos>"]
         self.end_idx: int = src_vocab["<eos>"]
 
-    def eval_model_training(self, src, src_mask, tgt, output):
+    def eval_model_training(self, src, tgt, output):
         with torch.no_grad():
             # Place in evaluation mode
             self.model.eval()
 
-            print("Example Translations:")
+            LOGGER.info("Example Translations:")
             for j in range(min(3, len(src))):  # Print translations for a few examples
                 input_sentence = " ".join(
                     [self.src_vocab.lookup_token(elem.item()) for elem in src[j]]
@@ -198,10 +200,10 @@ class TrainWorker:
                 greedy_translation = " ".join(
                     [self.tgt_vocab.lookup_token(elem) for elem in greedy_translation]
                 )
-                print(f"Input: {input_sentence}")
-                print(f"Target: {target_sentence}")
-                print(f"Predicted: {predicted_sentence}")
-                print(f"Greedy Translated: {greedy_translation}")
+                LOGGER.info(f"Input: {input_sentence}")
+                LOGGER.info(f"Target: {target_sentence}")
+                LOGGER.info(f"Predicted: {predicted_sentence}")
+                LOGGER.info(f"Greedy Translated: {greedy_translation}")
 
             # Put back to training mode
             self.model.train()
@@ -212,16 +214,20 @@ class TrainWorker:
 
         for idx, (src, tgt) in enumerate(self.train_dataloader):
             # Create masks
+            tgt_input = tgt[:, :-1]
             src_mask = compute_src_mask(src, self.pad_idx)
-            tgt_mask = compute_tgt_mask(tgt, self.pad_idx)
+            tgt_mask = compute_tgt_mask(tgt_input, self.pad_idx)
 
             self.optimizer.zero_grad()
 
             # Forward pass
-            output = self.model(src, tgt, tgt_mask, src_mask)
+            output = self.model(src, tgt_input, tgt_mask, src_mask)
 
             # Calculate loss
-            loss = self.criterion(output.view(-1, output.size(-1)), tgt.view(-1))
+            tgt_output = tgt[:, 1:]
+            loss = self.criterion(
+                output.view(-1, output.size(-1)), tgt_output.reshape(-1)
+            )
             total_loss += loss.item()
 
             # Backward pass, scheduler and update weights
@@ -231,16 +237,34 @@ class TrainWorker:
 
             if idx % self.eval_interval == 0:
                 avg_loss = total_loss / self.eval_interval
-                print(f"Iteration {idx}, Average Loss: {avg_loss}")
-                self.eval_model_training(src, src_mask, tgt, output)
+                LOGGER.info(f"Iteration {idx}, Average Loss: {avg_loss}")
+                self.eval_model_training(src, tgt, output)
+                # self.save_mask_to_disk(src_mask, f"masks/mask_{idx}.png")
         return total_loss / len(self.train_dataloader)
+
+    def save_mask_to_disk(mask):
+        # Ensure mask is on CPU and convert to numpy for visualization
+        mask = mask.squeeze()
+        mask_array = mask.cpu().numpy()
+
+        # Create a heatmap visualization of the mask
+        plt.figure(figsize=(10, 10))
+        plt.imshow(mask_array, cmap="gray", interpolation="none")
+        plt.title("Mask Visualization")
+        plt.xlabel("Sequence Position")
+        plt.ylabel("Batch Element" if mask_array.shape[0] > 1 else "Sequence Position")
+        plt.colorbar(label="Mask Value", orientation="vertical")
+
+        # Save the figure to the specified file path
+        # plt.savefig(file_path, bbox_inches="tight")
+        plt.close()
 
     def train(self, num_epochs: int):
         self.model.train()
         for epoch in range(num_epochs):
-            print(f"starting {epoch=}")
+            LOGGER.info(f"starting {epoch=}")
             epoch_loss = self.train_one_epoch()
-            print(f"finished {epoch=} has {epoch_loss=}")
+            LOGGER.info(f"finished {epoch=} has {epoch_loss=}")
 
 
 def train_model(num_epochs, num_batches, batch_size, eval_interval):
@@ -294,9 +318,7 @@ def train_model(num_epochs, num_batches, batch_size, eval_interval):
     trainer.train(num_epochs)
 
 
-def greedy_translate(
-    model, src, start_token, end_token, padding_token, max_len=50
-):
+def greedy_translate(model, src, start_token, end_token, padding_token, max_len=50):
     """
     Perform greedy translation.
     - src: Input source sequence tensor.
@@ -373,7 +395,7 @@ def main():
 
     args = ap.parse_args()
     if args.log_std:
-        logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
+        logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 
     train_model(
         num_epochs=args.num_epochs,

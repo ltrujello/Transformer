@@ -17,9 +17,9 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 #     # Transpose to get dimensions (batch_size, num_heads, seq_len, head_dim)
 #     return x.permute(0, 2, 1, 3)
 
+
 def split_heads(Q: torch.tensor, num_heads: int):
     return torch.stack(Q.split(num_heads, dim=-1))
-
 
 
 class MultiheadAttention(nn.Module):
