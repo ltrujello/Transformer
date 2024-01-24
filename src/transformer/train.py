@@ -1,12 +1,17 @@
 import torch
 import argparse
 import torch.nn as nn
+import logging
+import sys
 from torch.utils.data import DataLoader, Dataset
 from torchtext.datasets import Multi30k
 from torchtext.data.utils import get_tokenizer
 from torchtext.vocab import build_vocab_from_iterator
 from torch.optim.lr_scheduler import LambdaLR
-from transformer.transformer import Transformer, future_mask
+from transformer.model import Transformer, future_mask
+from typing import Optional
+
+LOGGER = logging.getLogger(__name__)
 
 
 def build_vocabularies(
@@ -37,7 +42,7 @@ def collate_fn(
     """
     inputs, targets = zip(*batch)
 
-    # Convert tokenized sequences to tensors. 35-40L cotopaxi
+    # Convert tokenized sequences to tensors.
     tensor_inputs = [torch.tensor([start_value] + x + [end_value]) for x in inputs]
     tensor_targets = [torch.tensor([start_value] + x + [end_value]) for x in targets]
 
@@ -120,70 +125,125 @@ def lr_schedule(step_num: int, d_model: int, warmup_steps: int) -> float:
     )
 
 
-def train_one_epoch(
-    model,
-    dataloader,
-    criterion,
-    optimizer,
-    lr_scheduler,
-    padding_value,
-    src_vocab,
-    tgt_vocab,
-    eval_interval=100,
-):
-    model.train()
-    total_loss = 0.0
+def compute_src_mask(src: torch.tensor, padding_value: int):
+    """
+    - src is a tensor with shape (batch_size, seq_len)
+    - output is a tensor with shape (batch_size, 1, seq_len)
+    """
+    return (src != padding_value).unsqueeze(1)
 
-    for idx, (src, tgt) in enumerate(dataloader):
-        # Create masks
-        src_mask = (src != padding_value).unsqueeze(1)
-        tgt_mask = future_mask(tgt.size(1)) & (tgt != padding_value).unsqueeze(1)
 
-        optimizer.zero_grad()
+def compute_tgt_mask(tgt: torch.tensor, padding_value: Optional[int] = None):
+    """
+    - tgt is a tensor with shape (batch_size, seq_len)
+    - output is a tensor with shape (batch_size, seq_len, seq_len)
+    """
+    if padding_value is None:
+        return future_mask(tgt.size(1))
+    return future_mask(tgt.size(1)) & (tgt != padding_value).unsqueeze(1)
 
-        # Forward pass
-        output = model(src, tgt, tgt_mask, src_mask)
 
-        # Calculate loss
-        loss = criterion(output.view(-1, output.size(-1)), tgt.view(-1))
-        total_loss += loss.item()
+class TrainWorker:
+    def __init__(
+        self,
+        model,
+        train_dataloader,
+        criterion,
+        optimizer,
+        lr_scheduler,
+        src_vocab,
+        tgt_vocab,
+        eval_interval,
+    ) -> None:
+        self.model = model
+        self.train_dataloader = train_dataloader
+        self.criterion = criterion
+        self.optimizer = optimizer
+        self.lr_scheduler = lr_scheduler
+        self.src_vocab = src_vocab
+        self.tgt_vocab = tgt_vocab
+        self.eval_interval: int = eval_interval
 
-        # Backward pass, scheduler and update weights
-        loss.backward()
-        optimizer.step()
-        lr_scheduler.step()
+        self.pad_idx: int = src_vocab["<blank>"]
+        self.start_idx: int = src_vocab["<sos>"]
+        self.end_idx: int = src_vocab["<eos>"]
 
-        if idx % eval_interval == 0:
+    def eval_model_training(self, src, src_mask, tgt, output):
+        with torch.no_grad():
             # Place in evaluation mode
-            model.eval()
-            avg_loss = total_loss / eval_interval
-            print(f"Iteration {idx}, Average Loss: {avg_loss}")
+            self.model.eval()
 
             print("Example Translations:")
             for j in range(min(3, len(src))):  # Print translations for a few examples
                 input_sentence = " ".join(
-                    [src_vocab.lookup_token(elem.item()) for elem in src[j]]
+                    [self.src_vocab.lookup_token(elem.item()) for elem in src[j]]
                 )
                 target_sentence = " ".join(
-                    [tgt_vocab.lookup_token(elem.item()) for elem in tgt[j]]
+                    [self.tgt_vocab.lookup_token(elem.item()) for elem in tgt[j]]
                 )
                 predicted_sentence = " ".join(
                     [
-                        tgt_vocab.lookup_token(elem.item())
+                        self.tgt_vocab.lookup_token(elem.item())
                         for elem in output.argmax(dim=-1)[j]
                     ]
+                )
+                greedy_translation = greedy_translate(
+                    self.model,
+                    src[j].unsqueeze(0),  # unsqueeze to add a batch dimension
+                    self.start_idx,
+                    self.end_idx,
+                    self.pad_idx,
+                    max_len=30,
+                )
+                greedy_translation = " ".join(
+                    [self.tgt_vocab.lookup_token(elem) for elem in greedy_translation]
                 )
                 print(f"Input: {input_sentence}")
                 print(f"Target: {target_sentence}")
                 print(f"Predicted: {predicted_sentence}")
+                print(f"Greedy Translated: {greedy_translation}")
 
             # Put back to training mode
-            model.train()
-    return total_loss / len(dataloader)
+            self.model.train()
+
+    def train_one_epoch(self):
+        self.model.train()
+        total_loss = 0.0
+
+        for idx, (src, tgt) in enumerate(self.train_dataloader):
+            # Create masks
+            src_mask = compute_src_mask(src, self.pad_idx)
+            tgt_mask = compute_tgt_mask(tgt, self.pad_idx)
+
+            self.optimizer.zero_grad()
+
+            # Forward pass
+            output = self.model(src, tgt, tgt_mask, src_mask)
+
+            # Calculate loss
+            loss = self.criterion(output.view(-1, output.size(-1)), tgt.view(-1))
+            total_loss += loss.item()
+
+            # Backward pass, scheduler and update weights
+            loss.backward()
+            self.optimizer.step()
+            self.lr_scheduler.step()
+
+            if idx % self.eval_interval == 0:
+                avg_loss = total_loss / self.eval_interval
+                print(f"Iteration {idx}, Average Loss: {avg_loss}")
+                self.eval_model_training(src, src_mask, tgt, output)
+        return total_loss / len(self.train_dataloader)
+
+    def train(self, num_epochs: int):
+        self.model.train()
+        for epoch in range(num_epochs):
+            print(f"starting {epoch=}")
+            epoch_loss = self.train_one_epoch()
+            print(f"finished {epoch=} has {epoch_loss=}")
 
 
 def train_model(num_epochs, num_batches, batch_size, eval_interval):
-    # Load the Multi30k dataset
     train_dataset, valid_dataset = Multi30k(
         root="data", split=("train", "valid"), language_pair=("de", "en")
     )
@@ -220,51 +280,101 @@ def train_model(num_epochs, num_batches, batch_size, eval_interval):
             step, d_model=model.d_model, warmup_steps=400
         ),
     )
+    # Train model
+    trainer = TrainWorker(
+        model,
+        train_dataloader,
+        criterion,
+        optimizer,
+        lr_scheduler,
+        src_vocab,
+        tgt_vocab,
+        eval_interval,
+    )
+    trainer.train(num_epochs)
 
-    model.train()
-    for epoch in range(num_epochs):
-        print(f"{epoch=}")
-        epoch_loss = train_one_epoch(
-            model,
-            train_dataloader,
-            criterion,
-            optimizer,
-            lr_scheduler,
-            pad_idx,
-            src_vocab,
-            tgt_vocab,
-            eval_interval,
-        )
-        print(f"{epoch=} has {epoch_loss=}")
+
+def greedy_translate(
+    model, src, start_token, end_token, padding_token, max_len=50
+):
+    """
+    Perform greedy translation.
+    - src: Input source sequence tensor.
+    - src_mask: Mask for the source sequence.
+    - max_len: Maximum length of the generated translation.
+    - start_token: Index of the start-of-sequence token.
+    - end_token: Index of the end-of-sequence token.
+
+    Returns:
+    - translated_tokens: List of token indices for the generated translation.
+    """
+    model.eval()
+    with torch.no_grad():
+        # Encode the source sequence
+        LOGGER.info(f"greedily translating {src.size()=}")
+        src_mask = compute_src_mask(src, padding_token)
+        enc_output = model.encode(src, src_mask)
+
+        # Initialize the target sequence with the start token
+        tgt = torch.full((src.size(0), 1), start_token)
+
+        for _ in range(max_len):
+            # Generate the next token
+            tgt_mask = future_mask(tgt.size(1))
+            dec_output = model.decode(tgt, enc_output, tgt_mask, src_mask)
+            dec_output = model.output_layer(dec_output)
+            dec_output = model.softmax(dec_output)
+            next_token = dec_output[:, -1, :].argmax(dim=-1).unsqueeze(1)
+
+            # Append the generated token to the target sequence
+            tgt = torch.cat([tgt, next_token], dim=1)
+
+            # Stop if the end token is generated
+            if next_token.item() == end_token:
+                break
+
+    # Convert tensor to list of token indices
+    translated_tokens = tgt.squeeze().tolist()
+    return translated_tokens
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument(
-        "--n_epochs",
+        "--num-epochs",
         default=1,
         type=int,
         help="total number of epochs",
     )
     ap.add_argument(
-        "--num_batches",
+        "--num-batches",
         default=100,
         type=int,
         help="total number of batches to train on",
     )
     ap.add_argument(
-        "--batch_size",
+        "--batch-size",
         default=10,
         type=int,
         help="size of each batch",
     )
     ap.add_argument(
-        "--print_every",
+        "--print-every",
         default=1000,
         type=int,
         help="print loss info every this many training examples",
     )
+    ap.add_argument(
+        "--log-std",
+        default=False,
+        action="store_true",
+        help="Redirect logs to standard output",
+    )
+
     args = ap.parse_args()
+    if args.log_std:
+        logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
+
     train_model(
         num_epochs=args.num_epochs,
         num_batches=args.num_batches,

@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
 import torch.nn as nn
+from typing import Optional
 import logging
 
 LOGGER = logging.getLogger(__name__)
@@ -8,8 +9,17 @@ LOGGER = logging.getLogger(__name__)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def split_heads(Q, num_heads):
+# def split_heads(x: torch.Tensor, num_heads: int):
+#     # Split the last dimension into (num_heads, head_dim).
+#     # x has shape: (batch_size, seq_len, d_model)
+#     new_shape = x.size()[:-1] + (num_heads, -1)
+#     x = x.view(*new_shape)  # x shape: (batch_size, seq_len, num_heads, head_dim)
+#     # Transpose to get dimensions (batch_size, num_heads, seq_len, head_dim)
+#     return x.permute(0, 2, 1, 3)
+
+def split_heads(Q: torch.tensor, num_heads: int):
     return torch.stack(Q.split(num_heads, dim=-1))
+
 
 
 class MultiheadAttention(nn.Module):
@@ -17,7 +27,7 @@ class MultiheadAttention(nn.Module):
     Class to compute multihead attention with num_heads-many heads
     """
 
-    def __init__(self, d_model, num_heads, dropout=0.1):
+    def __init__(self, d_model: int, num_heads: int, dropout: float = 0.1):
         super(MultiheadAttention, self).__init__()
         self.num_heads = num_heads
         self.head_dim = d_model // num_heads
@@ -31,7 +41,13 @@ class MultiheadAttention(nn.Module):
         self.W_o = nn.Linear(d_model, d_model, bias=False)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, Q, K, V, mask=None):
+    def forward(
+        self,
+        Q: torch.tensor,
+        K: torch.tensor,
+        V: torch.tensor,
+        mask: Optional[torch.tensor] = None,
+    ):
         LOGGER.debug(
             f"Computing multihead attention with {Q.size()=} {K.size()=} {V.size()=}"
             f" with mask.size()={mask.size() if mask is not None else None}"
@@ -56,7 +72,13 @@ class MultiheadAttention(nn.Module):
         return output, attention_weights
 
 
-def attention(Q, K, V, dropout=None, mask=None):
+def attention(
+    Q: torch.tensor,
+    K: torch.tensor,
+    V: torch.tensor,
+    dropout: Optional[float] = None,
+    mask: Optional[torch.tensor] = None,
+):
     """
     Computes attention given query, keys, values.
     If we have n-many key-value pairs of dimension dk, dv respectively
@@ -68,12 +90,14 @@ def attention(Q, K, V, dropout=None, mask=None):
     In the transformer architecture,
     - m = n = sequence_length
     - dk= dv = dmodel = 512.
+    - Thus, the attention score share would be (batch_size, seq_len, seq_len).
     """
     LOGGER.debug(
         f"computing attention with dimensions {Q.size()=} {K.size()=} {V.size()=}"
         f" with mask.size()={mask.size() if mask is not None else None}"
     )
-    dk = Q.size(-1)
+    # Ensure dk is of float type for precision
+    dk = float(Q.size(-1))
 
     # Compute attention
     scale = torch.sqrt(torch.tensor(dk)).to(device)
@@ -82,7 +106,7 @@ def attention(Q, K, V, dropout=None, mask=None):
     # Apply attention mask (if provided).
     if mask is not None:
         LOGGER.debug(f"Applying {mask.size()=} to {attention_scores.size()=}")
-        attention_scores = attention_scores.masked_fill(mask == 0, float("-inf"))
+        attention_scores = attention_scores.masked_fill(mask == 0, -1e9)
 
     attention_weights = F.softmax(attention_scores, dim=-1)
     if dropout is not None:
@@ -95,14 +119,14 @@ def attention(Q, K, V, dropout=None, mask=None):
 
 
 class PositionwiseFeedForward(nn.Module):
-    def __init__(self, d_model, d_ff, dropout=0.1):
+    def __init__(self, d_model: int, d_ff: int, dropout: float = 0.1):
         super(PositionwiseFeedForward, self).__init__()
         self.W_1 = nn.Linear(d_model, d_ff)
         self.relu = nn.ReLU()
         self.W_2 = nn.Linear(d_ff, d_model)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x):
+    def forward(self, x: torch.tensor) -> torch.tensor:
         """
         Computes
         FFN(x_i) = ReLU(x_iW_1 + b_1)W_2 + b_2.
@@ -118,7 +142,7 @@ class PositionwiseFeedForward(nn.Module):
 
 
 class LayerNorm(nn.Module):
-    def __init__(self, d_model, eps=1e-5):
+    def __init__(self, d_model: int, eps: float = 1e-5):
         """
         Computes layer normalization.
 
@@ -140,7 +164,7 @@ class LayerNorm(nn.Module):
         self.gamma = nn.Parameter(torch.ones(d_model))
         self.beta = nn.Parameter(torch.zeros(d_model))
 
-    def forward(self, x):
+    def forward(self, x: torch.tensor) -> torch.float:
         # Calculate mean and standard deviation along the last dimension
         mean = x.mean(dim=-1, keepdim=True)
         std = x.std(dim=-1, keepdim=True)
@@ -156,7 +180,7 @@ class EncoderLayer(nn.Module):
     Implements a single Encoder layer with pre-layer normalization.
     """
 
-    def __init__(self, d_model, num_heads, d_ffn, dropout=0.1):
+    def __init__(self, d_model: int, num_heads: int, d_ffn: int, dropout: float = 0.1):
         super(EncoderLayer, self).__init__()
 
         # Self-attention sub-layer
@@ -172,7 +196,7 @@ class EncoderLayer(nn.Module):
         # Dropout
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x, mask=None):
+    def forward(self, x: torch.tensor, mask: Optional[torch.tensor] = None):
         # Multihead self-attention sub-layer
         x_norm = self.norm1(x)
         attention_output, _ = self.self_attention(x_norm, x_norm, x_norm, mask=mask)
@@ -191,7 +215,7 @@ class DecoderLayer(nn.Module):
     Implements a single Decoder layer with pre-layer normalization.
     """
 
-    def __init__(self, d_model, num_heads, d_ffn, dropout=0.1):
+    def __init__(self, d_model: int, num_heads: int, d_ffn: int, dropout: float = 0.1):
         super(DecoderLayer, self).__init__()
 
         # Self-attention sub-layer
@@ -204,14 +228,20 @@ class DecoderLayer(nn.Module):
         self.feedforward = PositionwiseFeedForward(d_model, d_ffn, dropout=dropout)
 
         # Layer normalization
-        self.norm1 = nn.LayerNorm(d_model)
-        self.norm2 = nn.LayerNorm(d_model)
-        self.norm3 = nn.LayerNorm(d_model)
+        self.norm1 = LayerNorm(d_model)
+        self.norm2 = LayerNorm(d_model)
+        self.norm3 = LayerNorm(d_model)
 
         # Dropout
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x, encoder_output, self_mask=None, encoder_mask=None):
+    def forward(
+        self,
+        x: torch.tensor,
+        encoder_output: torch.tensor,
+        self_mask: Optional[torch.tensor] = None,
+        encoder_mask: Optional[torch.tensor] = None,
+    ):
         # Self-attention sub-layer
         x_norm = self.norm1(x)
         self_attention_output, _ = self.self_attention(
@@ -238,7 +268,14 @@ class DecoderLayer(nn.Module):
 class Encoder(nn.Module):
     "Class for encoder, which consists of N-many EncoderLayers"
 
-    def __init__(self, num_stacks, d_model, num_heads, d_ffn, dropout=0.1):
+    def __init__(
+        self,
+        num_stacks: int,
+        d_model: int,
+        num_heads: int,
+        d_ffn: int,
+        dropout: float = 0.1,
+    ):
         super(Encoder, self).__init__()
 
         self.layers = nn.ModuleList(
@@ -250,7 +287,7 @@ class Encoder(nn.Module):
             ]
         )
 
-    def forward(self, x, mask):
+    def forward(self, x: torch.tensor, mask: torch.tensor):
         "Pass the input (and mask) through each layer in turn."
         for layer in self.layers:
             x = layer(x, mask)
@@ -260,7 +297,14 @@ class Encoder(nn.Module):
 class Decoder(nn.Module):
     "Class for decoder, which consists of N-many DecoderLayers"
 
-    def __init__(self, num_stacks, d_model, num_heads, d_ffn, dropout=0.1):
+    def __init__(
+        self,
+        num_stacks: int,
+        d_model: int,
+        num_heads: int,
+        d_ffn: int,
+        dropout: float = 0.1,
+    ):
         super(Decoder, self).__init__()
 
         self.layers = nn.ModuleList(
@@ -272,14 +316,20 @@ class Decoder(nn.Module):
             ]
         )
 
-    def forward(self, x, encoder_output, self_mask, encoder_mask):
+    def forward(
+        self,
+        x: torch.tensor,
+        encoder_output: torch.tensor,
+        self_mask: torch.tensor,
+        encoder_mask: torch.tensor,
+    ):
         "Pass the input (and mask) through each layer in turn."
         for layer in self.layers:
             x = layer(x, encoder_output, self_mask, encoder_mask)
         return x
 
 
-def positional_encoding(max_len, d_model):
+def positional_encoding(max_len: int, d_model: int):
     """
     Computes positional encoding according to
     PE(pos, 2i) = sin(pos/10000^{2i / dmodel})
@@ -299,7 +349,7 @@ def positional_encoding(max_len, d_model):
     return pos_enc
 
 
-def future_mask(sequence_length):
+def future_mask(sequence_length: int):
     """
     Creates a lower-triangular n \\times n matrix
     used to mask future positions
@@ -310,13 +360,13 @@ def future_mask(sequence_length):
 
 
 class Embeddings(nn.Module):
-    def __init__(self, vocab_size, d_model):
+    def __init__(self, vocab_size: int, d_model: int):
         super(Embeddings, self).__init__()
         self.vocab_size = vocab_size
         self.lut = nn.Embedding(vocab_size, d_model)
         self.d_model = d_model
 
-    def forward(self, x):
+    def forward(self, x: torch.tensor):
         output = self.lut(x) * torch.sqrt(torch.tensor(self.d_model))
         return output
 
@@ -324,16 +374,16 @@ class Embeddings(nn.Module):
 class Transformer(nn.Module):
     def __init__(
         self,
-        num_encoder_stacks,
-        num_decoder_stacks,
-        src_vocab_size,
-        tgt_vocab_size,
-        d_model=512,
-        d_ffn=2048,
-        num_encoder_heads=8,
-        num_decoder_heads=8,
-        max_seq_len=100,
-        dropout=0.1,
+        src_vocab_size: int,
+        tgt_vocab_size: int,
+        num_encoder_stacks: int = 6,
+        num_decoder_stacks: int = 6,
+        d_model: int = 512,
+        d_ffn: int = 2048,
+        num_encoder_heads: int = 8,
+        num_decoder_heads: int = 8,
+        max_seq_len: int = 100,
+        dropout: float = 0.1,
     ):
         super(Transformer, self).__init__()
         self.d_model = d_model
@@ -346,8 +396,14 @@ class Transformer(nn.Module):
         self.output_layer = nn.Linear(d_model, tgt_vocab_size)
         self.src_dropout = nn.Dropout(dropout)
         self.tgt_dropout = nn.Dropout(dropout)
+        self.softmax = nn.Softmax(dim=-1)
 
-    def encode(self, src, src_mask):
+        # Initialize parameters with Glorot / fan_avg.
+        for p in self.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
+
+    def encode(self, src: torch.tensor, src_mask: torch.tensor):
         LOGGER.debug(
             "Computing forward pass of encoder with "
             f"{src.size()=}, {src_mask.size()=}"
@@ -361,7 +417,13 @@ class Transformer(nn.Module):
         enc_output = self.encoder(src, src_mask)
         return enc_output
 
-    def decode(self, tgt, enc_output, tgt_mask, src_mask):
+    def decode(
+        self,
+        tgt: torch.tensor,
+        enc_output: torch.tensor,
+        tgt_mask: torch.tensor,
+        src_mask: torch.tensor,
+    ):
         LOGGER.debug(
             "Computing forward pass of decoder with "
             f"{tgt.size()=}, {enc_output.size()=}, {tgt_mask.size()=}, {src_mask.size()=}"
@@ -375,7 +437,13 @@ class Transformer(nn.Module):
         dec_output = self.decoder(tgt, enc_output, tgt_mask, src_mask)
         return dec_output
 
-    def forward(self, src, tgt, tgt_mask, src_mask):
+    def forward(
+        self,
+        src: torch.tensor,
+        tgt: torch.tensor,
+        tgt_mask: torch.tensor,
+        src_mask: torch.tensor,
+    ):
         """
         Forward pass of Transformer.
 
@@ -383,8 +451,9 @@ class Transformer(nn.Module):
         - tgt has size (batch_size, tgt_seq_len)
         - src_mask has size (batch_size, 1, seq_len), and
           prevents attention to padding indices
-        - tgt_mask has size (batch_size, tgt_seq_len, tgt_seq_len), and
+        - tgt_mask has size (1, tgt_seq_len, tgt_seq_len), and
           prevents attention to future positions and padding
+        - output has size (batch_size, tgt_seq_len, tgt_vocab_size)
         """
         LOGGER.debug(
             f"computing forward pass with {src.size()=} "
@@ -395,7 +464,5 @@ class Transformer(nn.Module):
         dec_output = self.decode(tgt, enc_output, tgt_mask, src_mask)
 
         # Compute output layer
-        output = self.output_layer(dec_output)
-        output = torch.softmax(output, dim=-1)
-
-        return output
+        logits = self.output_layer(dec_output)
+        return logits

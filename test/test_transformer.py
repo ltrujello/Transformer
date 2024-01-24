@@ -1,6 +1,7 @@
 import pytest
 import torch
-from transformer.transformer import (
+from transformer.train import compute_tgt_mask
+from transformer.model import (
     MultiheadAttention,
     split_heads,
     attention,
@@ -257,6 +258,21 @@ def test_attention_padding_masking():
     assert torch.all(attn_weights[:, :, 5] == 0)
 
 
+def test_attention_future_and_padding_masking():
+    batch_size = 2
+    seq_len = 10
+    d_model = 5
+    Q = torch.rand(size=(batch_size, seq_len, d_model))
+    mask = compute_tgt_mask(torch.rand(size=(batch_size, seq_len)), padding_value=0)
+    mask[:, :, -1] = False
+    mask[:, :, 5] = False
+
+    attn_vals, attn_weights = attention(Q, Q, Q, mask=mask)
+
+    assert torch.all(attn_weights[:, :, -1] == 0)
+    assert torch.all(attn_weights[:, :, 5] == 0)
+
+
 def test_multihead_attention_future_masking(multihead_attention_instance):
     batch_size = 5
     seq_len = 10
@@ -312,7 +328,7 @@ def test_transformer_fake_data():
     src_mask = torch.ones(1, 1, 10).bool()
 
     tgt = torch.zeros(1, 1).type_as(src)
-    tgt_mask = future_mask(tgt.size(1))
+    tgt_mask = future_mask(tgt.size(-1))
 
     for i in range(9):
         print(i)
