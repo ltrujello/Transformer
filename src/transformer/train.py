@@ -3,6 +3,7 @@ import argparse
 import torch.nn as nn
 import logging
 import sys
+import datetime
 from torch.utils.data import DataLoader, Dataset
 from torchtext.datasets import Multi30k
 from torchtext.data.utils import get_tokenizer
@@ -146,7 +147,7 @@ def compute_tgt_mask(tgt: torch.tensor, padding_value: Optional[int] = None):
     if padding_value is None:
         return subsequent_mask
     padding_mask = (tgt != padding_value).unsqueeze(1)
-    return subsequent_mask & padding_mask.view(padding_mask.size(0), -1, 1)
+    return subsequent_mask & padding_mask
 
 
 class TrainWorker:
@@ -160,6 +161,7 @@ class TrainWorker:
         src_vocab,
         tgt_vocab,
         eval_interval,
+        checkpoint_every: Optional[int],
     ) -> None:
         self.model = model
         self.train_dataloader = train_dataloader
@@ -169,10 +171,14 @@ class TrainWorker:
         self.src_vocab = src_vocab
         self.tgt_vocab = tgt_vocab
         self.eval_interval: int = eval_interval
+        self.checkpoint_every = checkpoint_every
 
         self.pad_idx: int = src_vocab["<blank>"]
         self.start_idx: int = src_vocab["<sos>"]
         self.end_idx: int = src_vocab["<eos>"]
+
+        # Track training
+        self.curr_epoch = 0
 
     def eval_model_training(self, src, tgt, output):
         with torch.no_grad():
@@ -243,8 +249,20 @@ class TrainWorker:
                 avg_loss = total_loss / self.eval_interval
                 LOGGER.info(f"Iteration {idx}, Average Loss: {avg_loss}")
                 self.eval_model_training(src, tgt, output)
-                # self.save_mask_to_disk(src_mask, f"masks/mask_{idx}.png")
+
+            batch_size = src.size(0)
+            if self.checkpoint_every is not None:
+                if idx * batch_size % self.checkpoint_every == 0:
+                    self.checkpoint_model()
+
         return total_loss / len(self.train_dataloader)
+
+    def checkpoint_model(self):
+        curr_time: str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        torch.save(
+            self.model.state_dict(),
+            f"checkpoints/model_{self.curr_epoch}_{curr_time}.pth",
+        )
 
     def save_mask_to_disk(mask):
         # Ensure mask is on CPU and convert to numpy for visualization
@@ -269,9 +287,21 @@ class TrainWorker:
             LOGGER.info(f"starting {epoch=}")
             epoch_loss = self.train_one_epoch()
             LOGGER.info(f"finished {epoch=} has {epoch_loss=}")
+            self.curr_epoch += 1
+            self.checkpoint_model()
 
 
-def train_model(num_epochs, num_batches, batch_size, eval_interval):
+def train_model(
+    num_epochs: int,
+    num_batches: int,
+    batch_size: int,
+    eval_interval: int,
+    checkpoint_every: Optional[int],
+):
+    LOGGER.info(
+        f"Training model with {num_epochs=} {num_batches} "
+        f"{batch_size=} {eval_interval=} {checkpoint_every=}"
+    )
     train_dataset, valid_dataset = Multi30k(
         root="data", split=("train", "valid"), language_pair=("de", "en")
     )
@@ -318,6 +348,7 @@ def train_model(num_epochs, num_batches, batch_size, eval_interval):
         src_vocab,
         tgt_vocab,
         eval_interval,
+        checkpoint_every,
     )
     trainer.train(num_epochs)
 
@@ -390,21 +421,27 @@ def main():
         help="print loss info every this many training examples",
     )
     ap.add_argument(
-        "--log-std",
-        default=False,
-        action="store_true",
-        help="Redirect logs to standard output",
+        "--log-level",
+        choices=["INFO", "DEBUG", "ERROR", "NONE"],
+        default="NONE",
+        help="Redirect logs to standard output at a certain level",
+    )
+    ap.add_argument(
+        "--checkpoint-every",
+        type=int,
+        help="Save model parameters after this many training pairs.",
     )
 
     args = ap.parse_args()
-    if args.log_std:
-        logging.basicConfig(stream=sys.stdout, level=logging.INFO)
+    if args.log_level != "NONE":
+        logging.basicConfig(stream=sys.stdout, level=args.log_level)
 
     train_model(
         num_epochs=args.num_epochs,
         num_batches=args.num_batches,
         batch_size=args.batch_size,
         eval_interval=args.print_every,
+        checkpoint_every=args.checkpoint_every,
     )
 
 
