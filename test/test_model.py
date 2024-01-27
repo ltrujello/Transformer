@@ -146,6 +146,7 @@ def test_multihead_attention_dims(multihead_attention_instance, query_key_value)
     batch_size = 2
     sequence_length = 4
     d_model = 4
+    multihead_attention_instance.eval()
 
     # Create an instance of the multihead_attention class
     multihead_attention = multihead_attention_instance
@@ -287,6 +288,7 @@ def test_multihead_attention_future_masking(multihead_attention_instance):
     batch_size = 5
     seq_len = 10
     d_model = 4
+    multihead_attention_instance.eval()
 
     Q = torch.rand(size=(batch_size, seq_len, d_model))
     K = torch.rand(size=(batch_size, seq_len, d_model))
@@ -302,6 +304,7 @@ def test_multihead_attention_padding_masking(multihead_attention_instance):
     batch_size = 5
     seq_len = 10
     d_model = 4
+    multihead_attention_instance.eval()
 
     Q = torch.rand(size=(batch_size, seq_len, d_model))
     K = torch.rand(size=(batch_size, seq_len, d_model))
@@ -342,7 +345,7 @@ def test_transformer_fake_data():
 
     for i in range(9):
         print(i)
-        prob = test_model.forward(
+        prob, _ = test_model.forward(
             src=src,
             tgt=tgt,
             src_mask=src_mask,

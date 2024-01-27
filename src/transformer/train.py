@@ -231,7 +231,7 @@ class TrainWorker:
             self.optimizer.zero_grad()
 
             # Forward pass
-            output = self.model(src, tgt_input, tgt_mask, src_mask)
+            output, _ = self.model(src, tgt_input, tgt_mask, src_mask)
 
             # Calculate loss
             tgt_output = tgt[:, 1:]
@@ -287,7 +287,9 @@ class TrainWorker:
             LOGGER.info(f"starting {epoch=}")
             epoch_loss = self.train_one_epoch()
             LOGGER.info(f"finished {epoch=} has {epoch_loss=}")
+            # Increment epoch counter
             self.curr_epoch += 1
+            # Save model parameters to disk
             self.checkpoint_model()
 
 
@@ -297,6 +299,7 @@ def train_model(
     batch_size: int,
     eval_interval: int,
     checkpoint_every: Optional[int],
+    checkpoint_file: Optional[str],
 ):
     LOGGER.info(
         f"Training model with {num_epochs=} {num_batches} "
@@ -315,6 +318,10 @@ def train_model(
 
     # Instantiate model and dataloaders
     model = Transformer(len(src_vocab), len(tgt_vocab))
+    if checkpoint_file is not None:
+        LOGGER.info(f"Using {checkpoint_file=} for model parameters")
+        model.load_state_dict(torch.load(checkpoint_file))
+
     train_dataloader, test_dataloader = build_dataloaders(
         train_dataset,
         valid_dataset,
@@ -368,7 +375,6 @@ def greedy_translate(model, src, start_token, end_token, padding_token, max_len=
     model.eval()
     with torch.no_grad():
         # Encode the source sequence
-        LOGGER.info(f"greedily translating {src.size()=}")
         src_mask = compute_src_mask(src, padding_token)
         enc_output = model.encode(src, src_mask)
 
@@ -378,7 +384,7 @@ def greedy_translate(model, src, start_token, end_token, padding_token, max_len=
         for _ in range(max_len):
             # Generate the next token
             tgt_mask = future_mask(tgt.size(1))
-            dec_output = model.decode(tgt, enc_output, tgt_mask, src_mask)
+            dec_output, _ = model.decode(tgt, enc_output, tgt_mask, src_mask)
             dec_output = model.output_layer(dec_output)
             next_token = dec_output[:, -1, :].argmax(dim=-1).unsqueeze(1)
 
@@ -431,6 +437,10 @@ def main():
         type=int,
         help="Save model parameters after this many training pairs.",
     )
+    ap.add_argument(
+        "--checkpoint-file",
+        help="Continue training model parameters saved in a checkpoint file.",
+    )
 
     args = ap.parse_args()
     if args.log_level != "NONE":
@@ -442,6 +452,7 @@ def main():
         batch_size=args.batch_size,
         eval_interval=args.print_every,
         checkpoint_every=args.checkpoint_every,
+        checkpoint_file=args.checkpoint_file,
     )
 
 

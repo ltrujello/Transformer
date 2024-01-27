@@ -78,6 +78,8 @@ class MultiheadAttention(nn.Module):
         output = output.permute(0, 2, 1, 3).reshape(batch_size, -1, d_model)
         output = self.W_o(output)
 
+        if self.training:
+            return output, None
         return output, attention_weights
 
 
@@ -87,7 +89,7 @@ def attention(
     V: torch.tensor,
     dropout: Optional[nn.Dropout] = None,
     mask: Optional[torch.tensor] = None,
-):
+) -> tuple[torch.tensor, Optional[torch.tensor]]:
     """
     Computes attention given query, keys, values.
     If we have n-many key-value pairs of dimension dk, dv respectively
@@ -264,7 +266,7 @@ class DecoderLayer(nn.Module):
         # Encoder-Decoder attention sub-layer
         x_norm = self.norm2(x)
         encoder_output_norm = self.norm3(encoder_output)
-        encoder_attention_output, _ = self.encoder_attention(
+        encoder_attention_output, encoder_attention_weights = self.encoder_attention(
             x_norm, encoder_output_norm, encoder_output_norm, mask=encoder_mask
         )
         x = x + self.dropout(encoder_attention_output)
@@ -274,7 +276,7 @@ class DecoderLayer(nn.Module):
         ff_output = self.feedforward(x_norm)
         x = x + self.dropout(ff_output)
 
-        return x
+        return x, encoder_attention_weights
 
 
 class Encoder(nn.Module):
@@ -336,9 +338,13 @@ class Decoder(nn.Module):
         encoder_mask: torch.tensor,
     ):
         "Pass the input (and mask) through each layer in turn."
+        attn_weights = []
         for layer in self.layers:
-            x = layer(x, encoder_output, self_mask, encoder_mask)
-        return x
+            x, encoder_decoder_attn_weights = layer(
+                x, encoder_output, self_mask, encoder_mask
+            )
+            attn_weights.append(encoder_decoder_attn_weights)
+        return x, attn_weights
 
 
 def positional_encoding(max_len: int, d_model: int):
@@ -444,8 +450,10 @@ class Transformer(nn.Module):
         tgt = self.tgt_dropout(tgt)
 
         # Decode the target sequence using the encoder output
-        dec_output = self.decoder(tgt, enc_output, tgt_mask, src_mask)
-        return dec_output
+        dec_output, encoder_decoder_attn_weights = self.decoder(
+            tgt, enc_output, tgt_mask, src_mask
+        )
+        return dec_output, encoder_decoder_attn_weights
 
     def forward(
         self,
@@ -471,8 +479,10 @@ class Transformer(nn.Module):
         )
 
         enc_output = self.encode(src, src_mask)
-        dec_output = self.decode(tgt, enc_output, tgt_mask, src_mask)
+        dec_output, encoder_decoder_attn_weights = self.decode(
+            tgt, enc_output, tgt_mask, src_mask
+        )
 
         # Compute output layer
         logits = self.output_layer(dec_output)
-        return logits
+        return logits, encoder_decoder_attn_weights
