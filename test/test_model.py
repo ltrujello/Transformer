@@ -1,12 +1,14 @@
 import pytest
 import torch
 from transformer.train import compute_tgt_mask
-from transformer.model import (
+from transformer.attention import (
     MultiheadAttention,
     split_heads,
     attention,
-    positional_encoding,
     future_mask,
+)
+from transformer.model import (
+    positional_encoding,
     Transformer,
 )
 

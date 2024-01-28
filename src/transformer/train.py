@@ -9,7 +9,9 @@ from torchtext.datasets import Multi30k
 from torchtext.data.utils import get_tokenizer
 from torchtext.vocab import build_vocab_from_iterator
 from torch.optim.lr_scheduler import LambdaLR
-from transformer.model import Transformer, future_mask
+from transformer.model import Transformer
+from transformer.translation import tokens_to_string
+from transformer.attention import compute_src_mask, compute_tgt_mask, future_mask
 from typing import Optional
 import matplotlib.pyplot as plt
 
@@ -130,26 +132,6 @@ def lr_schedule(step_num: int, d_model: int, warmup_steps: int) -> float:
     )
 
 
-def compute_src_mask(src: torch.tensor, padding_value: int):
-    """
-    - src is a tensor with shape (batch_size, seq_len)
-    - output is a tensor with shape (batch_size, 1, seq_len)
-    """
-    return (src != padding_value).unsqueeze(1)
-
-
-def compute_tgt_mask(tgt: torch.tensor, padding_value: Optional[int] = None):
-    """
-    - tgt is a tensor with shape (batch_size, seq_len)
-    - output is a tensor with shape (batch_size, seq_len, seq_len)
-    """
-    subsequent_mask = future_mask(tgt.size(1))
-    if padding_value is None:
-        return subsequent_mask
-    padding_mask = (tgt != padding_value).unsqueeze(1)
-    return subsequent_mask & padding_mask
-
-
 class TrainWorker:
     def __init__(
         self,
@@ -187,17 +169,10 @@ class TrainWorker:
 
             LOGGER.info("Example Translations:")
             for j in range(min(3, len(src))):  # Print translations for a few examples
-                input_sentence = " ".join(
-                    [self.src_vocab.lookup_token(elem.item()) for elem in src[j]]
-                )
-                target_sentence = " ".join(
-                    [self.tgt_vocab.lookup_token(elem.item()) for elem in tgt[j]]
-                )
-                predicted_sentence = " ".join(
-                    [
-                        self.tgt_vocab.lookup_token(elem.item())
-                        for elem in output.argmax(dim=-1)[j]
-                    ]
+                input_sentence = tokens_to_string(self.src_vocab, src[j])
+                target_sentence = tokens_to_string(self.tgt_vocab, tgt[j])
+                predicted_sentence = tokens_to_string(
+                    self.tgt_vocab, output.argmax(dim=-1)[j]
                 )
                 greedy_translation = greedy_translate(
                     self.model,
@@ -207,8 +182,8 @@ class TrainWorker:
                     self.pad_idx,
                     max_len=30,
                 )
-                greedy_translation = " ".join(
-                    [self.tgt_vocab.lookup_token(elem) for elem in greedy_translation]
+                greedy_translation = tokens_to_string(
+                    self.tgt_vocab, greedy_translation
                 )
                 LOGGER.info(f"Input: {input_sentence}")
                 LOGGER.info(f"Target: {target_sentence}")
@@ -223,17 +198,18 @@ class TrainWorker:
         total_loss = 0.0
 
         for idx, (src, tgt) in enumerate(self.train_dataloader):
+            self.optimizer.zero_grad()
             # Create masks
+            # encourage model to predict EOS token, so we feed tgt[:, :-1] to forward pass
             tgt_input = tgt[:, :-1]
             src_mask = compute_src_mask(src, self.pad_idx)
             tgt_mask = compute_tgt_mask(tgt_input, self.pad_idx)
-
-            self.optimizer.zero_grad()
 
             # Forward pass
             output, _ = self.model(src, tgt_input, tgt_mask, src_mask)
 
             # Calculate loss
+            # Output consists of next token preds, so we feed tgt[:, 1:] to loss func
             tgt_output = tgt[:, 1:]
             loss = self.criterion(
                 output.view(-1, output.size(-1)), tgt_output.reshape(-1)

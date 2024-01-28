@@ -1,6 +1,19 @@
 import torch
 import seaborn as sns
 import matplotlib.pyplot as plt
+from transformer.attention import compute_src_mask, compute_tgt_mask
+from torchtext.data.metrics import bleu_score
+
+
+# model.load_state_dict(torch.load('checkpoints/model_10_2024-01-26 00:52:04.pth'))
+# src, tgt = next(iter(train_dataloader))
+# tgt_input = tgt[:, :-1]
+# src_mask = compute_src_mask(src, pad_idx)
+# tgt_mask = compute_tgt_mask(tgt_input, pad_idx)
+# output = model(src, tgt_input, tgt_mask, src_mask)
+# src_sentence_tokens = [src_vocab.lookup_token(elem.item()) for elem in src[0]]
+# tgt_sentence_tokens = [tgt_vocab.lookup_token(elem.item()) for elem in tgt_input[0]]
+# plot_attention(output[1], sentence_ind=0, layer=3, attention_head=2, src_sentence=src_sentence_tokens, tgt_sentence=tgt_sentence_tokens)
 
 
 def top_attentions(attention_matrix, num_tops=3):
@@ -80,3 +93,67 @@ def plot_attention(
         f"Encoder-Decoder {layer} Attention Head {attention_head}, Sequence {sentence_ind}"
     )
     plt.show()
+
+
+def tokens_to_string(
+    tokens: torch.tensor, vocab, ignore_special_toks=False
+) -> list[str]:
+    """Convert tokens to sentence."""
+    sos_idx = vocab["<sos>"]
+    eos_idx = vocab["<eos>"]
+    pad_idx = vocab["<blank>"]
+    sentence = []
+    for idx in tokens:
+        # Handle both torch.tensors and list[int]
+        if isinstance(idx, torch.Tensor):
+            idx = idx.item()
+        if ignore_special_toks and idx in [sos_idx, pad_idx, eos_idx]:
+            continue
+
+        sentence.append(vocab.lookup_token(idx))
+
+    return sentence
+
+
+def eval_model(model, tgt_vocab, test_dataloader):
+    """
+    Collect model predictions and ground truth translations, then
+    pass to a BLEU calculator.
+
+    E.g.:
+    Translation:  ['a', 'boy', 'raises', 'another', 'boy', 'on', 'to', 'his', 'back', '.']
+    Ground truth: [['one', 'boy', 'hoists', 'another', 'boy', 'up', 'on', 'his', 'back', '.']]
+    """
+    model.eval()
+
+    references: list[list[str]] = []
+    hypotheses: list[list[list[str]]] = []
+    pad_idx = tgt_vocab["<blank>"]
+
+    with torch.no_grad():
+        for src, tgt in test_dataloader:
+            tgt_input = tgt[:, :-1]
+            src_mask = compute_src_mask(src, pad_idx)
+            tgt_mask = compute_tgt_mask(tgt_input, pad_idx)
+
+            # Forward pass
+            output, _ = model(src, tgt_input, tgt_mask, src_mask)
+
+            # Convert output to actual text (depends on your implementation)
+            for i in range(len(output)):
+                translation = tokens_to_string(
+                    output.argmax(dim=-1)[i], tgt_vocab, ignore_special_toks=True
+                )  # Convert indices to text
+                reference = tokens_to_string(
+                    tgt[i], tgt_vocab, ignore_special_toks=True
+                )  # Get the actual target sentence
+
+                hypotheses.append(translation)
+                references.append([reference])  # BLEU expects a list of references
+
+    # Compute BLEU (using torchtext or sacrebleu)
+    bleu = bleu_score(hypotheses, references)
+    for translation, ground_truth in zip(hypotheses, references):
+        print("Translation: ", translation)
+        print("Ground truth:", ground_truth)
+    print(f"BLEU score: {bleu*100:.2f}")

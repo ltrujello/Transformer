@@ -1,5 +1,6 @@
 import torch
-from transformer.train import collate_fn, compute_src_mask, compute_tgt_mask
+from transformer.attention import compute_src_mask, compute_tgt_mask
+from transformer.train import collate_fn
 
 
 def test_collate_fn():
