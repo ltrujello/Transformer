@@ -4,7 +4,35 @@ import matplotlib.pyplot as plt
 from transformer.attention import compute_src_mask, compute_tgt_mask
 from torchtext.data.metrics import bleu_score
 
-
+# from transformer.train import *
+# from transformer.translation import *
+# train_dataset, valid_dataset = build_datasets(
+#     source_file_path="data/experiment_1/train.de",
+#     target_file_path="data/experiment_1/train.en",
+#     alignment_file_path="data/experiment_1/forward.align",
+# )
+# # Define a simple tokenizer
+# tokenizer = get_tokenizer("basic_english")
+# # Create vocabularies
+# src_vocab, tgt_vocab, pad_idx, start_idx, end_idx = build_vocabularies(
+#     train_dataset, valid_dataset, tokenizer
+# )
+# # Instantiate model and dataloaders
+# batch_size = 100
+# num_batches = 10
+# model = Transformer(len(src_vocab), len(tgt_vocab))
+# train_dataloader, test_dataloader = build_dataloaders(
+#     train_dataset,
+#     valid_dataset,
+#     tokenizer,
+#     src_vocab,
+#     tgt_vocab,
+#     pad_idx,
+#     start_idx,
+#     end_idx,
+#     batch_size=batch_size,
+#     num_batches=num_batches,
+# )
 # model.load_state_dict(torch.load('checkpoints/model_10_2024-01-26 00:52:04.pth'))
 # src, tgt = next(iter(train_dataloader))
 # tgt_input = tgt[:, :-1]
@@ -131,7 +159,7 @@ def eval_model(model, tgt_vocab, test_dataloader):
     pad_idx = tgt_vocab["<blank>"]
 
     with torch.no_grad():
-        for src, tgt in test_dataloader:
+        for src, tgt, _ in test_dataloader:
             tgt_input = tgt[:, :-1]
             src_mask = compute_src_mask(src, pad_idx)
             tgt_mask = compute_tgt_mask(tgt_input, pad_idx)

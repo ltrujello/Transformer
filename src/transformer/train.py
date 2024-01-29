@@ -25,11 +25,11 @@ def build_vocabularies(
 ) -> tuple:
     # Build vocabulary from iterator
     src_vocab = build_vocab_from_iterator(
-        map(tokenizer, [x for x, _ in (train_dataset + test_dataset)]),
+        map(tokenizer, [x for x, _, _ in (train_dataset + test_dataset)]),
         specials=["<eos>", "<sos>", "<blank>", "<unk>"],
     )
     tgt_vocab = build_vocab_from_iterator(
-        map(tokenizer, [x for _, x in (train_dataset + test_dataset)]),
+        map(tokenizer, [x for _, x, _ in (train_dataset + test_dataset)]),
         specials=["<eos>", "<sos>", "<blank>", "<unk>"],
     )
     pad_idx = src_vocab["<blank>"]
@@ -46,7 +46,7 @@ def collate_fn(
     Given a list of tokenized sequences, we add start, end, padding tokens, and
     return a torch.tensor representing the batch.
     """
-    inputs, targets = zip(*batch)
+    inputs, targets, alignments = zip(*batch)
 
     # Convert tokenized sequences to tensors.
     tensor_inputs = [torch.tensor([start_value] + x + [end_value]) for x in inputs]
@@ -60,7 +60,20 @@ def collate_fn(
         tensor_targets, batch_first=True, padding_value=padding_value
     )
 
-    return padded_inputs, padded_targets
+    # create alignment matrix
+    batch_size = len(batch)
+    src_seq_len = padded_inputs.size(1)
+    tgt_seq_len = padded_targets.size(1)
+    alignment_data = torch.zeros(batch_size, tgt_seq_len - 1, src_seq_len)
+    for idx, alignment in enumerate(alignments):
+        alignment_pairs: list[tuple[int]] = [
+            tuple(map(int, pair.split("-"))) for pair in alignment.split(" ")
+        ]
+        for pair in alignment_pairs:
+            x, y = pair
+            alignment_data[idx][y + 1][x + 1] = 1 # shift by one because of SOS tokens
+
+    return padded_inputs, padded_targets, alignment_data
 
 
 def build_dataloaders(
@@ -94,16 +107,16 @@ def build_dataloaders(
     #     )
     # else:
     training_data = []
-    for idx, (x, y) in enumerate(train_dataset):
+    for idx, (x, y, z) in enumerate(train_dataset):
         if idx > num_batches * batch_size:
             break
-        training_data.append((src_vocab(tokenizer(x)), tgt_vocab(tokenizer(y))))
+        training_data.append((src_vocab(tokenizer(x)), tgt_vocab(tokenizer(y)), z))
 
     test_data = []
-    for idx, (x, y) in enumerate(test_dataset):
+    for idx, (x, y, z) in enumerate(test_dataset):
         if idx > num_batches * batch_size:
             break
-        test_data.append((src_vocab(tokenizer(x)), tgt_vocab(tokenizer(y))))
+        test_data.append((src_vocab(tokenizer(x)), tgt_vocab(tokenizer(y)), z))
 
     train_dataloader = DataLoader(
         training_data,
@@ -131,6 +144,107 @@ def lr_schedule(step_num: int, d_model: int, warmup_steps: int) -> float:
     return d_model ** (-0.5) * min(
         step_num ** (-0.5), step_num * warmup_steps ** (-1.5)
     )
+
+
+def compute_alignment_error(attn_weights, alignment, mse):
+    loss = 0
+    # Traverse each sentence, translation pair, and compute alignment loss
+    for elem in range(len(attn_weights)):
+        # Only grab the first layer, first attention head
+        first_attn_head = attn_weights[0][0]
+        masked_attn_head = first_attn_head * alignment[elem]
+        loss += mse(alignment[elem], masked_attn_head)
+    return loss
+
+
+class TranslationDataset(Dataset):
+    def __init__(
+        self,
+        source_file_path,
+        target_file_path,
+        alignment_file_path,
+        split_ratio,
+        train,
+        source_transform=None,
+        target_transform=None,
+    ):
+        """
+        Args:
+            source_file_path (str): Path to the file containing source sentences.
+            target_file_path (str): Path to the file containing target sentences.
+        """
+        self.split_ratio = split_ratio
+        self.train = train
+
+        # Read the files and split into lines
+        with open(source_file_path) as f:
+            self.source_sentences = f.readlines()
+
+        with open(target_file_path) as f:
+            self.target_sentences = f.readlines()
+
+        with open(alignment_file_path) as f:
+            self.alignments = f.readlines()
+
+        total_size = len(self.source_sentences)
+        train_size = int(total_size * split_ratio)
+        test_size = total_size - train_size
+
+        if self.train:
+            self.source_sentences = self.source_sentences[:train_size]
+            self.target_sentences = self.target_sentences[:train_size]
+            self.alignments = self.alignments[:train_size]
+        else:
+            self.source_sentences = self.source_sentences[test_size:]
+            self.target_sentences = self.target_sentences[test_size:]
+            self.alignments = self.alignments[test_size:]
+
+        assert (
+            len(self.source_sentences)
+            == len(self.target_sentences)
+            == len(self.alignments)
+        ), f"Mismatch in number of sentences between source and target files. {len(self.source_sentences)=} {len(self.target_sentences)=} {len(self.alignments)=}"
+
+        self.source_transform = source_transform
+        self.target_transform = target_transform
+
+    def __len__(self):
+        return len(self.source_sentences)
+
+    def __getitem__(self, idx):
+        source_sentence = self.source_sentences[idx]
+        target_sentence = self.target_sentences[idx]
+        alignment = self.alignments[idx]
+
+        if self.source_transform:
+            source_sentence = self.source_transform(source_sentence)
+
+        if self.target_transform:
+            target_sentence = self.target_transform(target_sentence)
+
+        return source_sentence, target_sentence, alignment
+
+
+def build_datasets(
+    source_file_path,
+    target_file_path,
+    alignment_file_path,
+):
+    test_dataset = TranslationDataset(
+        source_file_path=source_file_path,
+        target_file_path=target_file_path,
+        alignment_file_path=alignment_file_path,
+        split_ratio=0.8,
+        train=True,
+    )
+    train_dataset = TranslationDataset(
+        source_file_path=source_file_path,
+        target_file_path=target_file_path,
+        alignment_file_path=alignment_file_path,
+        split_ratio=0.2,
+        train=False,
+    )
+    return test_dataset, train_dataset
 
 
 class TrainWorker:
@@ -163,6 +277,8 @@ class TrainWorker:
         self.pad_idx: int = src_vocab["<blank>"]
         self.start_idx: int = src_vocab["<sos>"]
         self.end_idx: int = src_vocab["<eos>"]
+
+        self.mse = nn.MSELoss()
 
         # Track training
         self.curr_epoch = 0
@@ -210,7 +326,7 @@ class TrainWorker:
         self.model.train()
         total_loss = 0.0
 
-        for idx, (src, tgt) in enumerate(self.train_dataloader):
+        for idx, (src, tgt, alignment) in enumerate(self.train_dataloader):
             self.optimizer.zero_grad()
             # Create masks
             # encourage model to predict EOS token, so we feed tgt[:, :-1] to forward pass
@@ -219,7 +335,7 @@ class TrainWorker:
             tgt_mask = compute_tgt_mask(tgt_input, self.pad_idx)
 
             # Forward pass
-            output, _ = self.model(src, tgt_input, tgt_mask, src_mask)
+            output, attn_weights = self.model(src, tgt_input, tgt_mask, src_mask)
 
             # Calculate loss
             # Output consists of next token preds, so we feed tgt[:, 1:] to loss func
@@ -227,6 +343,13 @@ class TrainWorker:
             loss = self.criterion(
                 output.view(-1, output.size(-1)), tgt_output.reshape(-1)
             )
+            # Can we guide the attention of the Transformer?
+            # What if we "guided" the attention to words we know should have
+            # strong alignmenjts during training?
+            # LOGGER.info(f"{len(src)=}, {attn_weights[0][:, 0,0,0].size()=}")
+            # loss += compute_alignment_error(attn_weights[0], alignment, self.mse)
+            # 12.63 BLEU with the alignment error backprop
+
             total_loss += loss.item()
 
             # Backward pass, scheduler and update weights
@@ -305,8 +428,13 @@ def train_model(
         f"{checkpoint_file=} {checkpoint_epochs=} {checkpoint_final=} "
         f"{run_eval_model=}"
     )
-    train_dataset, valid_dataset = Multi30k(
-        root="data", split=("train", "valid"), language_pair=("de", "en")
+    # train_dataset, valid_dataset = Multi30k(
+    #     root="data", split=("train", "valid"), language_pair=("de", "en")
+    # )
+    train_dataset, valid_dataset = build_datasets(
+        source_file_path="data/experiment_1/train.de",
+        target_file_path="data/experiment_1/train.en",
+        alignment_file_path="data/experiment_1/forward.align",
     )
     # Define a simple tokenizer
     tokenizer = get_tokenizer("basic_english")

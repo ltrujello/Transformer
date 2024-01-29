@@ -108,8 +108,8 @@ class MultiheadAttention(nn.Module):
         output = output.permute(0, 2, 1, 3).reshape(batch_size, -1, d_model)
         output = self.W_o(output)
 
-        if self.training:
-            return output, None
+        # if self.training:
+        #     return output, None
         return output, attention_weights
 
 
