@@ -14,6 +14,7 @@ from transformer.translation import tokens_to_string
 from transformer.attention import compute_src_mask, compute_tgt_mask, future_mask
 from typing import Optional
 import matplotlib.pyplot as plt
+from transformer.translation import eval_model
 
 
 LOGGER = logging.getLogger(__name__)
@@ -144,6 +145,8 @@ class TrainWorker:
         tgt_vocab,
         eval_interval,
         checkpoint_every: Optional[int],
+        checkpoint_epochs: bool,
+        checkpoint_final: bool,
     ) -> None:
         self.model = model
         self.train_dataloader = train_dataloader
@@ -154,6 +157,8 @@ class TrainWorker:
         self.tgt_vocab = tgt_vocab
         self.eval_interval: int = eval_interval
         self.checkpoint_every = checkpoint_every
+        self.checkpoint_epochs = checkpoint_epochs
+        self.checkpoint_final = checkpoint_final
 
         self.pad_idx: int = src_vocab["<blank>"]
         self.start_idx: int = src_vocab["<sos>"]
@@ -169,10 +174,17 @@ class TrainWorker:
 
             LOGGER.info("Example Translations:")
             for j in range(min(3, len(src))):  # Print translations for a few examples
-                input_sentence = tokens_to_string(self.src_vocab, src[j])
-                target_sentence = tokens_to_string(self.tgt_vocab, tgt[j])
+                input_sentence = tokens_to_string(
+                    src[j],
+                    self.src_vocab,
+                )
+                target_sentence = tokens_to_string(
+                    tgt[j],
+                    self.tgt_vocab,
+                )
                 predicted_sentence = tokens_to_string(
-                    self.tgt_vocab, output.argmax(dim=-1)[j]
+                    output.argmax(dim=-1)[j],
+                    self.tgt_vocab,
                 )
                 greedy_translation = greedy_translate(
                     self.model,
@@ -183,7 +195,8 @@ class TrainWorker:
                     max_len=30,
                 )
                 greedy_translation = tokens_to_string(
-                    self.tgt_vocab, greedy_translation
+                    greedy_translation,
+                    self.tgt_vocab,
                 )
                 LOGGER.info(f"Input: {input_sentence}")
                 LOGGER.info(f"Target: {target_sentence}")
@@ -223,7 +236,9 @@ class TrainWorker:
 
             if idx % self.eval_interval == 0:
                 avg_loss = total_loss / self.eval_interval
-                LOGGER.info(f"Iteration {idx}, Average Loss: {avg_loss}")
+                LOGGER.info(
+                    f"Epoch {self.curr_epoch}, Iteration {idx}, {idx / len(self.train_dataloader) * 100}% done, Average Loss: {avg_loss}"
+                )
                 self.eval_model_training(src, tgt, output)
 
             batch_size = src.size(0)
@@ -235,10 +250,9 @@ class TrainWorker:
 
     def checkpoint_model(self):
         curr_time: str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        torch.save(
-            self.model.state_dict(),
-            f"checkpoints/model_{self.curr_epoch}_{curr_time}.pth",
-        )
+        filename = f"checkpoints/model_{self.curr_epoch}_{curr_time}.pth"
+        LOGGER.info(f"Saving model parameters to disk with {filename=}")
+        torch.save(self.model.state_dict(), filename)
 
     def save_mask_to_disk(mask):
         # Ensure mask is on CPU and convert to numpy for visualization
@@ -266,6 +280,11 @@ class TrainWorker:
             # Increment epoch counter
             self.curr_epoch += 1
             # Save model parameters to disk
+            if self.checkpoint_epochs:
+                self.checkpoint_model()
+
+        # Checkpoint model once at the end.
+        if self.checkpoint_final:
             self.checkpoint_model()
 
 
@@ -276,10 +295,15 @@ def train_model(
     eval_interval: int,
     checkpoint_every: Optional[int],
     checkpoint_file: Optional[str],
+    checkpoint_epochs: bool,
+    checkpoint_final: bool,
+    run_eval_model: bool,
 ):
     LOGGER.info(
         f"Training model with {num_epochs=} {num_batches} "
-        f"{batch_size=} {eval_interval=} {checkpoint_every=}"
+        f"{batch_size=} {eval_interval=} {checkpoint_every=} "
+        f"{checkpoint_file=} {checkpoint_epochs=} {checkpoint_final=} "
+        f"{run_eval_model=}"
     )
     train_dataset, valid_dataset = Multi30k(
         root="data", split=("train", "valid"), language_pair=("de", "en")
@@ -332,8 +356,13 @@ def train_model(
         tgt_vocab,
         eval_interval,
         checkpoint_every,
+        checkpoint_epochs,
+        checkpoint_final,
     )
     trainer.train(num_epochs)
+
+    if run_eval_model:
+        eval_model(model, tgt_vocab, test_dataloader)
 
 
 def greedy_translate(model, src, start_token, end_token, padding_token, max_len=50):
@@ -417,6 +446,24 @@ def main():
         "--checkpoint-file",
         help="Continue training model parameters saved in a checkpoint file.",
     )
+    ap.add_argument(
+        "--checkpoint-epochs",
+        default=False,
+        type=bool,
+        help="Save model parameters at the end of every epoch.",
+    )
+    ap.add_argument(
+        "--checkpoint-final",
+        default=False,
+        type=bool,
+        help="Save model parameters at the very last epoch.",
+    )
+    ap.add_argument(
+        "--eval-model",
+        default=True,
+        type=bool,
+        help="Run model over test set and report BLEU score.",
+    )
 
     args = ap.parse_args()
     if args.log_level != "NONE":
@@ -429,6 +476,9 @@ def main():
         eval_interval=args.print_every,
         checkpoint_every=args.checkpoint_every,
         checkpoint_file=args.checkpoint_file,
+        checkpoint_epochs=args.checkpoint_epochs,
+        checkpoint_final=args.checkpoint_final,
+        run_eval_model=args.eval_model,
     )
 
 
