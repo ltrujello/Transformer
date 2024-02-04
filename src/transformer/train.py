@@ -4,6 +4,7 @@ import torch.nn as nn
 import logging
 import sys
 import datetime
+from pathlib import Path
 from torch.utils.data import DataLoader, Dataset
 from torchtext.datasets import Multi30k
 from torchtext.data.utils import get_tokenizer
@@ -14,10 +15,14 @@ from transformer.translation import tokens_to_string
 from transformer.attention import compute_src_mask, compute_tgt_mask, future_mask
 from typing import Optional
 import matplotlib.pyplot as plt
-from transformer.translation import eval_model
+from transformer.translation import eval_model, plot_attention, plot_alignment
 
 
 LOGGER = logging.getLogger(__name__)
+LOGGER_FMT = logging.Formatter(
+    "%(levelname)s:%(name)s [%(asctime)s] %(message)s", datefmt="%d/%b/%Y %H:%M:%S"
+)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def build_vocabularies(
@@ -71,7 +76,7 @@ def collate_fn(
         ]
         for pair in alignment_pairs:
             x, y = pair
-            alignment_data[idx][y + 1][x + 1] = 1 # shift by one because of SOS tokens
+            alignment_data[idx][y + 1][x + 1] = 1  # shift by one because of SOS tokens
 
     return padded_inputs, padded_targets, alignment_data
 
@@ -88,24 +93,6 @@ def build_dataloaders(
     batch_size,
     num_batches,
 ) -> tuple[DataLoader, DataLoader]:
-    # if num_elements is None:
-    #     train_dataloader = DataLoader(
-    #         [
-    #             (src_vocab(tokenizer(x)), tgt_vocab(tokenizer(y)))
-    #             for x, y in train_dataset
-    #         ],
-    #         collate_fn=lambda x: collate_fn(x, pad_idx, start_idx, end_idx),
-    #         batch_size=batch_size,
-    #     )
-    #     test_dataloader = DataLoader(
-    #         [
-    #             (src_vocab(tokenizer(x)), tgt_vocab(tokenizer(y)))
-    #             for x, y in test_dataset
-    #         ],
-    #         collate_fn=lambda x: collate_fn(x, pad_idx, start_idx, end_idx),
-    #         batch_size=batch_size,
-    #     )
-    # else:
     training_data = []
     for idx, (x, y, z) in enumerate(train_dataset):
         if idx > num_batches * batch_size:
@@ -122,15 +109,19 @@ def build_dataloaders(
         training_data,
         collate_fn=lambda x: collate_fn(x, pad_idx, start_idx, end_idx),
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=False,
     )
     test_dataloader = DataLoader(
         test_data,
         collate_fn=lambda x: collate_fn(x, pad_idx, start_idx, end_idx),
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=False,
     )
 
+    LOGGER.info(
+        f"Successfully created training dataloader of size {len(train_dataloader)=} with {train_dataloader.batch_size=} and "
+        f"test dataloader of size {len(test_dataloader)=} with {test_dataloader.batch_size=}"
+    )
     return train_dataloader, test_dataloader
 
 
@@ -146,12 +137,21 @@ def lr_schedule(step_num: int, d_model: int, warmup_steps: int) -> float:
     )
 
 
-def compute_alignment_error(attn_weights, alignment, mse):
+def compute_alignment_error(attn_weights, alignment, mse, layer, head):
+    """
+    attn_weights comes from decoder-encoder attention calculation.
+    It is assumed to be a list of shapes (batch_size, num_heads, tgt_seq_len - 1, src_seq_len).
+    The length of the list is the number of layers
+    Thus, alignment should have shape (batch_size, tgt_seq_len - 1, src_seq_len).
+
+    Note that we subtract 1 from tgt_seq_len because during training, we remove the
+    last column of tgt_seq_len before feeding it to the decoder.
+    """
     loss = 0
     # Traverse each sentence, translation pair, and compute alignment loss
-    for elem in range(len(attn_weights)):
-        # Only grab the first layer, first attention head
-        first_attn_head = attn_weights[0][0]
+    for elem in range(len(alignment)):
+        # Grab the attention matrix at layer 5, attention head 1
+        first_attn_head = attn_weights[layer][elem][head]
         masked_attn_head = first_attn_head * alignment[elem]
         loss += mse(alignment[elem], masked_attn_head)
     return loss
@@ -163,8 +163,8 @@ class TranslationDataset(Dataset):
         source_file_path,
         target_file_path,
         alignment_file_path,
-        split_ratio,
-        train,
+        split_ratio=1,
+        train=True,
         source_transform=None,
         target_transform=None,
     ):
@@ -178,26 +178,13 @@ class TranslationDataset(Dataset):
 
         # Read the files and split into lines
         with open(source_file_path) as f:
-            self.source_sentences = f.readlines()
+            self.source_sentences = [line.strip() for line in f.readlines()]
 
         with open(target_file_path) as f:
-            self.target_sentences = f.readlines()
+            self.target_sentences = [line.strip() for line in f.readlines()]
 
         with open(alignment_file_path) as f:
-            self.alignments = f.readlines()
-
-        total_size = len(self.source_sentences)
-        train_size = int(total_size * split_ratio)
-        test_size = total_size - train_size
-
-        if self.train:
-            self.source_sentences = self.source_sentences[:train_size]
-            self.target_sentences = self.target_sentences[:train_size]
-            self.alignments = self.alignments[:train_size]
-        else:
-            self.source_sentences = self.source_sentences[test_size:]
-            self.target_sentences = self.target_sentences[test_size:]
-            self.alignments = self.alignments[test_size:]
+            self.alignments = [line.strip() for line in f.readlines()]
 
         assert (
             len(self.source_sentences)
@@ -226,25 +213,28 @@ class TranslationDataset(Dataset):
 
 
 def build_datasets(
-    source_file_path,
-    target_file_path,
-    alignment_file_path,
+    train_source_file_path,
+    train_target_file_path,
+    train_alignment_file_path,
+    test_source_file_path,
+    test_target_file_path,
+    test_alignment_file_path,
 ):
-    test_dataset = TranslationDataset(
-        source_file_path=source_file_path,
-        target_file_path=target_file_path,
-        alignment_file_path=alignment_file_path,
-        split_ratio=0.8,
-        train=True,
-    )
     train_dataset = TranslationDataset(
-        source_file_path=source_file_path,
-        target_file_path=target_file_path,
-        alignment_file_path=alignment_file_path,
-        split_ratio=0.2,
-        train=False,
+        source_file_path=train_source_file_path,
+        target_file_path=train_target_file_path,
+        alignment_file_path=train_alignment_file_path,
     )
-    return test_dataset, train_dataset
+    test_dataset = TranslationDataset(
+        source_file_path=test_source_file_path,
+        target_file_path=test_target_file_path,
+        alignment_file_path=test_alignment_file_path,
+    )
+    LOGGER.info(
+        f"Successfully created training dataset of size {len(train_dataset)=} and "
+        f"test dataset of size {len(test_dataset)=}"
+    )
+    return train_dataset, test_dataset
 
 
 class TrainWorker:
@@ -252,18 +242,26 @@ class TrainWorker:
         self,
         model,
         train_dataloader,
+        test_dataset,
+        tokenizer,
         criterion,
         optimizer,
         lr_scheduler,
         src_vocab,
         tgt_vocab,
         eval_interval,
+        root: str,
         checkpoint_every: Optional[int],
         checkpoint_epochs: bool,
-        checkpoint_final: bool,
+        save_model_run: Optional[bool],
+        exp_layer: int,
+        exp_head: int,
+        run_experiment: bool = False,
     ) -> None:
         self.model = model
         self.train_dataloader = train_dataloader
+        self.test_dataset = test_dataset
+        self.tokenizer = tokenizer
         self.criterion = criterion
         self.optimizer = optimizer
         self.lr_scheduler = lr_scheduler
@@ -272,7 +270,16 @@ class TrainWorker:
         self.eval_interval: int = eval_interval
         self.checkpoint_every = checkpoint_every
         self.checkpoint_epochs = checkpoint_epochs
-        self.checkpoint_final = checkpoint_final
+        self.save_model_run = save_model_run
+        self.epoch_loss: list[float] = []
+        self.root = Path(root)
+        self.exp_layer = exp_layer
+        self.exp_head = exp_head
+        self.run_experiment = run_experiment
+
+        if self.save_model_run and not self.root.exists():
+            LOGGER.info(f"Creating directory for model details with path {self.root=}")
+            self.root.mkdir()
 
         self.pad_idx: int = src_vocab["<blank>"]
         self.start_idx: int = src_vocab["<sos>"]
@@ -327,12 +334,18 @@ class TrainWorker:
         total_loss = 0.0
 
         for idx, (src, tgt, alignment) in enumerate(self.train_dataloader):
+            src = src.to(device)
+            tgt = tgt.to(device)
+            alignment = alignment.to(device)
+
             self.optimizer.zero_grad()
             # Create masks
             # encourage model to predict EOS token, so we feed tgt[:, :-1] to forward pass
             tgt_input = tgt[:, :-1]
             src_mask = compute_src_mask(src, self.pad_idx)
             tgt_mask = compute_tgt_mask(tgt_input, self.pad_idx)
+            src_mask = src_mask.to(device)
+            tgt_mask = tgt_mask.to(device)
 
             # Forward pass
             output, attn_weights = self.model(src, tgt_input, tgt_mask, src_mask)
@@ -344,11 +357,10 @@ class TrainWorker:
                 output.view(-1, output.size(-1)), tgt_output.reshape(-1)
             )
             # Can we guide the attention of the Transformer?
-            # What if we "guided" the attention to words we know should have
-            # strong alignmenjts during training?
-            # LOGGER.info(f"{len(src)=}, {attn_weights[0][:, 0,0,0].size()=}")
-            # loss += compute_alignment_error(attn_weights[0], alignment, self.mse)
-            # 12.63 BLEU with the alignment error backprop
+            if self.run_experiment:
+                loss += compute_alignment_error(
+                    attn_weights, alignment, self.mse, self.exp_layer, self.exp_head
+                )
 
             total_loss += loss.item()
 
@@ -372,8 +384,8 @@ class TrainWorker:
         return total_loss / len(self.train_dataloader)
 
     def checkpoint_model(self):
-        curr_time: str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        filename = f"checkpoints/model_{self.curr_epoch}_{curr_time}.pth"
+        model_name = self.root.name
+        filename = str(self.root / f"{model_name}_epoch_{self.curr_epoch}.pth")
         LOGGER.info(f"Saving model parameters to disk with {filename=}")
         torch.save(self.model.state_dict(), filename)
 
@@ -400,15 +412,118 @@ class TrainWorker:
             LOGGER.info(f"starting {epoch=}")
             epoch_loss = self.train_one_epoch()
             LOGGER.info(f"finished {epoch=} has {epoch_loss=}")
+            # Collect epoch loss
+            self.epoch_loss.append(epoch_loss)
+
             # Increment epoch counter
             self.curr_epoch += 1
-            # Save model parameters to disk
+
+            # Save model parameters to disk if applicable
             if self.checkpoint_epochs:
                 self.checkpoint_model()
 
-        # Checkpoint model once at the end.
-        if self.checkpoint_final:
+        # Perform various routines on trained model if desired
+        if self.save_model_run:
+            self.model.eval()
             self.checkpoint_model()
+            self.create_training_loss_graph()
+            self.sample_and_save_attention()
+
+    def create_training_loss_graph(self):
+        """
+        Creates a training loss graph. Saves a line plot with epoch num on the x-axis,
+        and epoch loss on the y-axis.
+        """
+        num_epochs = len(self.epoch_loss)
+        epochs = range(num_epochs)
+
+        # Create a line plot
+        plt.figure(figsize=(10, 6))
+        plt.plot(
+            range(num_epochs),
+            self.epoch_loss,
+            marker="o",
+            linestyle="-",
+            color="b",
+            label="Training Loss",
+        )
+        plt.title(f"Training Loss of {self.root.name} Over Epochs")
+        plt.xlabel("Epochs")
+        plt.ylabel("Loss")
+        plt.xticks(epochs)  # Set x-ticks to be the epochs
+        plt.legend()
+        plt.grid(True)
+
+        # Save the plot to a file
+        training_loss_filename = str(self.root / "training_loss.png")
+        plt.savefig(training_loss_filename)
+        LOGGER.info(
+            f"Created and saved training loss graph to {training_loss_filename=}"
+        )
+
+    def sample_and_save_attention(self):
+        """
+        Samples 5 sentences from test dataset and plots their attention and word alignments.
+        """
+        reset_to_training = False
+        if self.model.training:
+            reset_to_training = True
+
+        self.model.eval()
+        # Grab five sentences from the test dataset
+        for idx in range(5):
+            src, tgt, alignment = self.test_dataset[idx]
+            # Preprocess data
+            src, tgt, alignment = collate_fn(
+                [
+                    (
+                        self.src_vocab(self.tokenizer(src)),
+                        self.tgt_vocab(self.tokenizer(tgt)),
+                        alignment,
+                    )
+                ],
+                self.pad_idx,
+                self.start_idx,
+                self.end_idx,
+            )
+            src = src.to(device)
+            tgt = tgt.to(device)
+
+            # Forward pass
+            tgt_input = tgt[:, :-1]
+            src_mask = compute_src_mask(src, self.pad_idx)
+            tgt_mask = compute_tgt_mask(tgt_input, self.pad_idx)
+            src_mask = src_mask.to(device)
+            tgt_mask = tgt_mask.to(device)
+            output, attn_weights = self.model(src, tgt_input, tgt_mask, src_mask)
+
+            # Plot attention and save to disk
+            plot_attention(
+                attention_head_weights=attn_weights,
+                sentence_ind=0,
+                layer=0,
+                attention_head=0,
+                src_sentence=tokens_to_string(src[0], self.src_vocab),
+                tgt_sentence=tokens_to_string(tgt[0], self.tgt_vocab),
+                filename=str(self.root / f"attention_sample_{idx}.png"),
+            )
+
+            # Plot word alignment and save to disk
+            plot_alignment(
+                alignment=alignment[0],
+                src_sentence=tokens_to_string(src[0], self.src_vocab),
+                tgt_sentence=tokens_to_string(tgt[0], self.tgt_vocab),
+                filename=str(self.root / f"alignment_{idx}.png"),
+            )
+
+        if reset_to_training:
+            self.model.train()
+
+
+def create_model_name():
+    curr_time: str = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    model_name = f"model_{curr_time}"
+    return model_name
 
 
 def train_model(
@@ -419,22 +534,58 @@ def train_model(
     checkpoint_every: Optional[int],
     checkpoint_file: Optional[str],
     checkpoint_epochs: bool,
-    checkpoint_final: bool,
+    save_model_run: bool,
     run_eval_model: bool,
+    message: Optional[str],
+    learning_rate: float,
+    exp_layer: int,
+    exp_head: int,
+    root: Optional[str],
+    run_experiment: bool = False,
 ):
+    if not root:
+        model_name = create_model_name()
+    else:
+        root = Path(root)
+        if not root.exists():
+            root.mkdir()
+        model_name = root / create_model_name()
+
+    if save_model_run:
+        # Create directory for the model
+        model_dir = Path(model_name)
+        if not model_dir.exists():
+            model_dir.mkdir()
+
+        # Attach fileHandler to logger and store logs in the model_dir
+        log_filename = f"{model_name}/training.log"
+        LOGGER.info(f"Saving logs to {log_filename=}")
+        file_handler = logging.FileHandler(log_filename)
+        file_handler.setLevel(logging.INFO)
+        file_handler.setFormatter(LOGGER_FMT)
+        LOGGER.addHandler(file_handler)
+
+        # Write down the model description message in model_dir
+        if message is not None:
+            notes_filename = f"{model_name}/notes.txt"
+            LOGGER.info(f"Creating a notes file with {notes_filename=}")
+            with open(notes_filename, "w") as f:
+                f.write(message)
+
     LOGGER.info(
-        f"Training model with {num_epochs=} {num_batches} "
+        f"Training model {model_name=} with {num_epochs=} {num_batches} "
         f"{batch_size=} {eval_interval=} {checkpoint_every=} "
-        f"{checkpoint_file=} {checkpoint_epochs=} {checkpoint_final=} "
-        f"{run_eval_model=}"
+        f"{checkpoint_file=} {checkpoint_epochs=} {save_model_run=} "
+        f"{run_eval_model=} {learning_rate=} {run_experiment=} "
+        f" {exp_layer=} {exp_head=} {message=} "
     )
-    # train_dataset, valid_dataset = Multi30k(
-    #     root="data", split=("train", "valid"), language_pair=("de", "en")
-    # )
     train_dataset, valid_dataset = build_datasets(
-        source_file_path="data/experiment_1/train.de",
-        target_file_path="data/experiment_1/train.en",
-        alignment_file_path="data/experiment_1/forward.align",
+        train_source_file_path="data/experiment_1/train.de",
+        train_target_file_path="data/experiment_1/train.en",
+        train_alignment_file_path="data/experiment_1/train.align",
+        test_source_file_path="data/experiment_1/val.de",
+        test_target_file_path="data/experiment_1/val.en",
+        test_alignment_file_path="data/experiment_1/val.align",
     )
     # Define a simple tokenizer
     tokenizer = get_tokenizer("basic_english")
@@ -444,12 +595,7 @@ def train_model(
         train_dataset, valid_dataset, tokenizer
     )
 
-    # Instantiate model and dataloaders
-    model = Transformer(len(src_vocab), len(tgt_vocab))
-    if checkpoint_file is not None:
-        LOGGER.info(f"Using {checkpoint_file=} for model parameters")
-        model.load_state_dict(torch.load(checkpoint_file))
-
+    # Create dataloaders
     train_dataloader, test_dataloader = build_dataloaders(
         train_dataset,
         valid_dataset,
@@ -463,9 +609,16 @@ def train_model(
         num_batches=num_batches,
     )
 
+    model = Transformer(len(src_vocab), len(tgt_vocab))
+    model.to(device)
+    if checkpoint_file is not None:
+        LOGGER.info(f"Using {checkpoint_file=} for model parameters")
+        model.load_state_dict(torch.load(checkpoint_file))
+
     criterion = nn.CrossEntropyLoss(ignore_index=pad_idx)
+    criterion.to(device)
     optimizer = torch.optim.Adam(
-        model.parameters(), lr=0.1, betas=(0.9, 0.98), eps=1e-9
+        model.parameters(), lr=learning_rate, betas=(0.9, 0.98), eps=1e-9
     )
     lr_scheduler = LambdaLR(
         optimizer=optimizer,
@@ -475,22 +628,31 @@ def train_model(
     )
     # Train model
     trainer = TrainWorker(
-        model,
-        train_dataloader,
-        criterion,
-        optimizer,
-        lr_scheduler,
-        src_vocab,
-        tgt_vocab,
-        eval_interval,
-        checkpoint_every,
-        checkpoint_epochs,
-        checkpoint_final,
+        model=model,
+        train_dataloader=train_dataloader,
+        test_dataset=valid_dataset,
+        tokenizer=tokenizer,
+        criterion=criterion,
+        optimizer=optimizer,
+        lr_scheduler=lr_scheduler,
+        src_vocab=src_vocab,
+        tgt_vocab=tgt_vocab,
+        eval_interval=eval_interval,
+        checkpoint_every=checkpoint_every,
+        checkpoint_epochs=checkpoint_epochs,
+        save_model_run=save_model_run,
+        root=model_name,
+        run_experiment=run_experiment,
+        exp_layer=exp_layer,
+        exp_head=exp_head,
     )
+
     trainer.train(num_epochs)
 
     if run_eval_model:
-        eval_model(model, tgt_vocab, test_dataloader)
+        eval_model(model, tgt_vocab, test_dataloader, LOGGER)
+
+    return model, train_dataloader, test_dataloader, src_vocab, tgt_vocab
 
 
 def greedy_translate(model, src, start_token, end_token, padding_token, max_len=50):
@@ -509,14 +671,16 @@ def greedy_translate(model, src, start_token, end_token, padding_token, max_len=
     with torch.no_grad():
         # Encode the source sequence
         src_mask = compute_src_mask(src, padding_token)
+        src_mask = src_mask.to(device)
         enc_output = model.encode(src, src_mask)
 
         # Initialize the target sequence with the start token
-        tgt = torch.full((1, 1), start_token)
+        tgt = torch.full((1, 1), start_token).to(device)
 
         for _ in range(max_len):
             # Generate the next token
             tgt_mask = future_mask(tgt.size(1))
+            tgt_mask = tgt_mask.to(device)
             dec_output, _ = model.decode(tgt, enc_output, tgt_mask, src_mask)
             dec_output = model.output_layer(dec_output)
             next_token = dec_output[:, -1, :].argmax(dim=-1).unsqueeze(1)
@@ -581,7 +745,7 @@ def main():
         help="Save model parameters at the end of every epoch.",
     )
     ap.add_argument(
-        "--checkpoint-final",
+        "--save-model-run",
         default=False,
         type=bool,
         help="Save model parameters at the very last epoch.",
@@ -592,10 +756,53 @@ def main():
         type=bool,
         help="Run model over test set and report BLEU score.",
     )
+    ap.add_argument(
+        "--message",
+        type=str,
+        help="Include a helpful message describing the model. Only used when save-model-run is True.",
+    )
+    ap.add_argument(
+        "--run-experiment",
+        default=False,
+        type=bool,
+        help="Optionally run experiment.",
+    )
+    ap.add_argument(
+        "--exp-layer",
+        type=int,
+        help="Layer which we modifiy in our experiment.",
+    )
+    ap.add_argument(
+        "--exp-head",
+        type=int,
+        help="Attention head which we modify in our experiment.",
+    )
+    ap.add_argument(
+        "--learning-rate",
+        default=0.1,
+        type=float,
+        help="Learning rate for the model.",
+    )
+    ap.add_argument(
+        "--model-root",
+        type=str,
+        help="Parent directory to store the model.",
+    )
+    ap.add_argument(
+        "--log-stdout",
+        default=True,
+        type=bool,
+        help="Control whether to log to standard output.",
+    )
 
     args = ap.parse_args()
-    if args.log_level != "NONE":
-        logging.basicConfig(stream=sys.stdout, level=args.log_level)
+    if args.log_stdout:
+        # Create a stream handler for stdout
+        stream_handler = logging.StreamHandler(sys.stdout)
+        stream_handler.setLevel(args.log_level)
+        stream_handler.setFormatter(LOGGER_FMT)
+        LOGGER.addHandler(stream_handler)
+        LOGGER.setLevel(args.log_level)
 
     train_model(
         num_epochs=args.num_epochs,
@@ -605,8 +812,14 @@ def main():
         checkpoint_every=args.checkpoint_every,
         checkpoint_file=args.checkpoint_file,
         checkpoint_epochs=args.checkpoint_epochs,
-        checkpoint_final=args.checkpoint_final,
+        save_model_run=args.save_model_run,
         run_eval_model=args.eval_model,
+        message=args.message,
+        learning_rate=args.learning_rate,
+        run_experiment=args.run_experiment,
+        exp_layer=args.exp_layer,
+        exp_head=args.exp_head,
+        root=args.model_root,
     )
 
 

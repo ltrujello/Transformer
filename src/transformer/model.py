@@ -5,6 +5,7 @@ import logging
 from transformer.attention import MultiheadAttention
 
 LOGGER = logging.getLogger(__name__)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 class PositionwiseFeedForward(nn.Module):
@@ -246,7 +247,7 @@ class Embeddings(nn.Module):
         self.d_model = d_model
 
     def forward(self, x: torch.tensor):
-        output = self.lut(x) * torch.sqrt(torch.tensor(self.d_model))
+        output = self.lut(x) * torch.sqrt(torch.tensor(self.d_model)).to(device)
         return output
 
 

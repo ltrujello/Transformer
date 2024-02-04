@@ -1,47 +1,16 @@
 import torch
+import logging
 import seaborn as sns
 import matplotlib.pyplot as plt
 from transformer.attention import compute_src_mask, compute_tgt_mask
 from torchtext.data.metrics import bleu_score
+from typing import Optional
 
-# from transformer.train import *
-# from transformer.translation import *
-# train_dataset, valid_dataset = build_datasets(
-#     source_file_path="data/experiment_1/train.de",
-#     target_file_path="data/experiment_1/train.en",
-#     alignment_file_path="data/experiment_1/forward.align",
-# )
-# # Define a simple tokenizer
-# tokenizer = get_tokenizer("basic_english")
-# # Create vocabularies
-# src_vocab, tgt_vocab, pad_idx, start_idx, end_idx = build_vocabularies(
-#     train_dataset, valid_dataset, tokenizer
-# )
-# # Instantiate model and dataloaders
-# batch_size = 100
-# num_batches = 10
-# model = Transformer(len(src_vocab), len(tgt_vocab))
-# train_dataloader, test_dataloader = build_dataloaders(
-#     train_dataset,
-#     valid_dataset,
-#     tokenizer,
-#     src_vocab,
-#     tgt_vocab,
-#     pad_idx,
-#     start_idx,
-#     end_idx,
-#     batch_size=batch_size,
-#     num_batches=num_batches,
-# )
-# model.load_state_dict(torch.load('checkpoints/model_10_2024-01-26 00:52:04.pth'))
-# src, tgt = next(iter(train_dataloader))
-# tgt_input = tgt[:, :-1]
-# src_mask = compute_src_mask(src, pad_idx)
-# tgt_mask = compute_tgt_mask(tgt_input, pad_idx)
-# output = model(src, tgt_input, tgt_mask, src_mask)
-# src_sentence_tokens = [src_vocab.lookup_token(elem.item()) for elem in src[0]]
-# tgt_sentence_tokens = [tgt_vocab.lookup_token(elem.item()) for elem in tgt_input[0]]
-# plot_attention(output[1], sentence_ind=0, layer=3, attention_head=2, src_sentence=src_sentence_tokens, tgt_sentence=tgt_sentence_tokens)
+LOGGER = logging.getLogger(__name__)
+LOGGER_FMT = logging.Formatter(
+    "%(levelname)s:%(name)s [%(asctime)s] %(message)s", datefmt="%d/%b/%Y %H:%M:%S"
+)
+LOGGER.setLevel(logging.INFO)
 
 
 def top_attentions(attention_matrix, num_tops=3):
@@ -101,12 +70,20 @@ def plot_attention(
     attention_head,
     src_sentence: list[str],
     tgt_sentence: list[str],
+    filename: Optional[str] = None,
 ):
-    plt.figure(figsize=(10, 8))
-    src_eos = src_sentence.index("<blank>")
-    tgt_eos = src_sentence.index("<blank>")
+    plt.figure(figsize=(12, 10))
+    try:
+        src_eos = src_sentence.index("<blank>")
+    except ValueError:
+        src_eos = len(src_sentence)
+    try:
+        tgt_eos = src_sentence.index("<blank>")
+    except ValueError:
+        tgt_eos = len(tgt_sentence)
+
     sns.heatmap(
-        attention_head_weights[layer][sentence_ind][attention_head][:src_eos, :tgt_eos]
+        attention_head_weights[layer][sentence_ind][attention_head][:tgt_eos, :src_eos]
         .detach()
         .cpu()
         .numpy(),
@@ -120,7 +97,10 @@ def plot_attention(
     plt.title(
         f"Encoder-Decoder {layer} Attention Head {attention_head}, Sequence {sentence_ind}"
     )
-    plt.show()
+    if filename is None:
+        plt.show()
+    else:
+        plt.savefig(filename)
 
 
 def tokens_to_string(
@@ -143,7 +123,7 @@ def tokens_to_string(
     return sentence
 
 
-def eval_model(model, tgt_vocab, test_dataloader):
+def eval_model(model, tgt_vocab, test_dataloader, logger):
     """
     Collect model predictions and ground truth translations, then
     pass to a BLEU calculator.
@@ -182,6 +162,23 @@ def eval_model(model, tgt_vocab, test_dataloader):
     # Compute BLEU (using torchtext or sacrebleu)
     bleu = bleu_score(hypotheses, references)
     for translation, ground_truth in zip(hypotheses, references):
-        print("Translation: ", translation)
-        print("Ground truth:", ground_truth)
-    print(f"BLEU score: {bleu*100:.2f}")
+        logger.info(f"Translation: {translation}")
+        logger.info(f"Ground truth: {ground_truth}")
+    logger.info(f"BLEU score: {bleu*100:.2f}")
+    return bleu
+
+
+def plot_alignment(alignment, src_sentence, tgt_sentence, filename):
+    fig, ax = plt.subplots()
+    cax = ax.matshow(alignment, cmap="gray")
+    plt.yticks(range(len(tgt_sentence)), tgt_sentence, rotation=90)
+    plt.xticks(range(len(src_sentence)), src_sentence)
+
+    # Add colorbar for reference
+    plt.colorbar(cax)
+
+    plt.title("Alignment Visualization")
+    if filename is None:
+        plt.show()
+    else:
+        plt.savefig(filename)

@@ -15,8 +15,10 @@ def future_mask(sequence_length: int):
     used to mask future positions
     """
     attn_shape = (1, sequence_length, sequence_length)
-    future_mask = torch.triu(torch.ones(attn_shape), diagonal=1).type(torch.uint8)
-    return future_mask == 0
+    future_mask = (
+        torch.triu(torch.ones(attn_shape), diagonal=1).type(torch.uint8).to(device)
+    )
+    return (future_mask == 0).to(device)
 
 
 def compute_src_mask(src: torch.tensor, padding_value: int):
