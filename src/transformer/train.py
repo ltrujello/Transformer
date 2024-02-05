@@ -22,7 +22,8 @@ LOGGER = logging.getLogger(__name__)
 LOGGER_FMT = logging.Formatter(
     "%(levelname)s:%(name)s [%(asctime)s] %(message)s", datefmt="%d/%b/%Y %H:%M:%S"
 )
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+# device = torch.device("cpu")
 
 
 def build_vocabularies(

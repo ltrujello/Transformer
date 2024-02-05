@@ -11,6 +11,8 @@ LOGGER_FMT = logging.Formatter(
     "%(levelname)s:%(name)s [%(asctime)s] %(message)s", datefmt="%d/%b/%Y %H:%M:%S"
 )
 LOGGER.setLevel(logging.INFO)
+device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+# device = torch.device("cpu")
 
 
 def top_attentions(attention_matrix, num_tops=3):
@@ -140,6 +142,8 @@ def eval_model(model, tgt_vocab, test_dataloader, logger):
 
     with torch.no_grad():
         for src, tgt, _ in test_dataloader:
+            src = src.to(device)
+            tgt = tgt.to(device)
             tgt_input = tgt[:, :-1]
             src_mask = compute_src_mask(src, pad_idx)
             tgt_mask = compute_tgt_mask(tgt_input, pad_idx)

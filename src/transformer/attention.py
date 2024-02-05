@@ -6,7 +6,8 @@ import logging
 
 
 LOGGER = logging.getLogger(__name__)
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+# device = torch.device("cpu")
 
 
 def future_mask(sequence_length: int):
@@ -37,7 +38,7 @@ def compute_tgt_mask(tgt: torch.tensor, padding_value: Optional[int] = None):
     subsequent_mask = future_mask(tgt.size(1))
     if padding_value is None:
         return subsequent_mask
-    padding_mask = (tgt != padding_value).unsqueeze(1)
+    padding_mask = (tgt != padding_value).unsqueeze(1).to(device)
     return subsequent_mask & padding_mask
 
 
