@@ -6,24 +6,25 @@ import sys
 import datetime
 from pathlib import Path
 from torch.utils.data import DataLoader, Dataset
-from torchtext.datasets import Multi30k
+
+# from torchtext.datasets import Multi30k
 from torchtext.data.utils import get_tokenizer
 from torchtext.vocab import build_vocab_from_iterator
 from torch.optim.lr_scheduler import LambdaLR
 from transformer.model import Transformer
-from transformer.translation import tokens_to_string
-from transformer.attention import compute_src_mask, compute_tgt_mask, future_mask
+from transformer.translation import tokens_to_string, greedy_translate
+from transformer.attention import compute_src_mask, compute_tgt_mask
 from typing import Optional
 import matplotlib.pyplot as plt
 from transformer.translation import eval_model, plot_attention, plot_alignment
+from transformer.utils import configure_device
 
 
 LOGGER = logging.getLogger(__name__)
 LOGGER_FMT = logging.Formatter(
     "%(levelname)s:%(name)s [%(asctime)s] %(message)s", datefmt="%d/%b/%Y %H:%M:%S"
 )
-device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
-# device = torch.device("cpu")
+device = configure_device()
 
 
 def build_vocabularies(
@@ -654,48 +655,6 @@ def train_model(
         eval_model(model, tgt_vocab, test_dataloader, LOGGER)
 
     return model, train_dataloader, test_dataloader, src_vocab, tgt_vocab
-
-
-def greedy_translate(model, src, start_token, end_token, padding_token, max_len=50):
-    """
-    Perform greedy translation.
-    - src: Input source sequence tensor.
-    - src_mask: Mask for the source sequence.
-    - max_len: Maximum length of the generated translation.
-    - start_token: Index of the start-of-sequence token.
-    - end_token: Index of the end-of-sequence token.
-
-    Returns:
-    - translated_tokens: List of token indices for the generated translation.
-    """
-    model.eval()
-    with torch.no_grad():
-        # Encode the source sequence
-        src_mask = compute_src_mask(src, padding_token)
-        src_mask = src_mask.to(device)
-        enc_output = model.encode(src, src_mask)
-
-        # Initialize the target sequence with the start token
-        tgt = torch.full((1, 1), start_token).to(device)
-
-        for _ in range(max_len):
-            # Generate the next token
-            tgt_mask = future_mask(tgt.size(1))
-            tgt_mask = tgt_mask.to(device)
-            dec_output, _ = model.decode(tgt, enc_output, tgt_mask, src_mask)
-            dec_output = model.output_layer(dec_output)
-            next_token = dec_output[:, -1, :].argmax(dim=-1).unsqueeze(1)
-
-            # Append the generated token to the target sequence
-            tgt = torch.cat([tgt, next_token], dim=1)
-
-            # Stop if the end token is generated
-            if next_token.item() == end_token:
-                break
-
-    # Convert tensor to list of token indices
-    translated_tokens = tgt.squeeze().tolist()
-    return translated_tokens
 
 
 def main():

@@ -3,10 +3,10 @@ import torch.nn as nn
 from typing import Optional
 import logging
 from transformer.attention import MultiheadAttention
+from transformer.utils import configure_device
 
 LOGGER = logging.getLogger(__name__)
-device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
-# device = torch.device("cpu")
+device = configure_device()
 
 
 class PositionwiseFeedForward(nn.Module):

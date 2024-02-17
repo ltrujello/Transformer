@@ -8,11 +8,15 @@ def test_collate_fn():
     start_value = 1
     end_value = 2
     batch = [
-        ([3, 4, 5, 6], [7, 8, 9, 10]),
-        ([3, 4, 5, 6, 7, 8], [9, 10, 11, 12, 13, 14, 15, 16, 17]),
+        ([3, 4, 5, 6], [7, 8, 9, 10], "0-0"),
+        (
+            [3, 4, 5, 6, 7, 8],
+            [9, 10, 11, 12, 13, 14, 15, 16, 17],
+            "0-0",
+        ),
     ]
 
-    inputs, outputs = collate_fn(batch, padding_value, start_value, end_value)
+    inputs, outputs, _ = collate_fn(batch, padding_value, start_value, end_value)
 
     assert torch.all(
         inputs

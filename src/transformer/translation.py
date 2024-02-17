@@ -2,17 +2,18 @@ import torch
 import logging
 import seaborn as sns
 import matplotlib.pyplot as plt
-from transformer.attention import compute_src_mask, compute_tgt_mask
+from transformer.attention import compute_src_mask, future_mask
 from torchtext.data.metrics import bleu_score
 from typing import Optional
+from transformer.utils import configure_device
 
 LOGGER = logging.getLogger(__name__)
 LOGGER_FMT = logging.Formatter(
     "%(levelname)s:%(name)s [%(asctime)s] %(message)s", datefmt="%d/%b/%Y %H:%M:%S"
 )
 LOGGER.setLevel(logging.INFO)
-device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
-# device = torch.device("cpu")
+# device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+device = configure_device()
 
 
 def top_attentions(attention_matrix, num_tops=3):
@@ -66,26 +67,38 @@ def determine_alignments(src_vocab, tgt_vocab, attention_matrix):
 
 
 def plot_attention(
-    attention_head_weights: torch.tensor,
+    model,
+    src,
     sentence_ind,
     layer,
     attention_head,
-    src_sentence: list[str],
-    tgt_sentence: list[str],
+    src_vocab,
+    tgt_vocab,
     filename: Optional[str] = None,
 ):
+    start_idx = src_vocab["<sos>"]
+    end_idx = src_vocab["<eos>"]
+    pad_idx = src_vocab["<blank>"]
+    tgt_input, attention_head_weights = greedy_translate(
+        model,
+        src[sentence_ind].unsqueeze(0),
+        start_token=start_idx,
+        end_token=end_idx,
+        padding_token=pad_idx,
+    )
+    src_sentence = [src_vocab.lookup_token(elem.item()) for elem in src[sentence_ind]]
+    tgt_sentence = [tgt_vocab.lookup_token(elem) for elem in tgt_input]
+
     plt.figure(figsize=(12, 10))
     try:
         src_eos = src_sentence.index("<blank>")
     except ValueError:
         src_eos = len(src_sentence)
-    try:
-        tgt_eos = src_sentence.index("<blank>")
-    except ValueError:
-        tgt_eos = len(tgt_sentence)
+
+    tgt_eos = len(tgt_sentence)
 
     sns.heatmap(
-        attention_head_weights[layer][sentence_ind][attention_head][:tgt_eos, :src_eos]
+        attention_head_weights[layer][0][attention_head][:tgt_eos, :src_eos]
         .detach()
         .cpu()
         .numpy(),
@@ -125,7 +138,7 @@ def tokens_to_string(
     return sentence
 
 
-def eval_model(model, tgt_vocab, test_dataloader, logger):
+def eval_model(model, tgt_vocab, test_dataloader, logger=None):
     """
     Collect model predictions and ground truth translations, then
     pass to a BLEU calculator.
@@ -138,23 +151,23 @@ def eval_model(model, tgt_vocab, test_dataloader, logger):
 
     references: list[list[str]] = []
     hypotheses: list[list[list[str]]] = []
-    pad_idx = tgt_vocab["<blank>"]
+    start_token = tgt_vocab["<sos>"]
+    end_token = tgt_vocab["<eos>"]
+    pad_token = tgt_vocab["<blank>"]
 
     with torch.no_grad():
         for src, tgt, _ in test_dataloader:
-            src = src.to(device)
-            tgt = tgt.to(device)
-            tgt_input = tgt[:, :-1]
-            src_mask = compute_src_mask(src, pad_idx)
-            tgt_mask = compute_tgt_mask(tgt_input, pad_idx)
+            translations = []
+            for elem in src:
+                translation, _ = greedy_translate(
+                    model, elem.unsqueeze(0), start_token, end_token, pad_token
+                )
+                translations.append(translation)
 
-            # Forward pass
-            output, _ = model(src, tgt_input, tgt_mask, src_mask)
-
-            # Convert output to actual text (depends on your implementation)
-            for i in range(len(output)):
+            # Convert output to actual text
+            for i in range(len(translations)):
                 translation = tokens_to_string(
-                    output.argmax(dim=-1)[i], tgt_vocab, ignore_special_toks=True
+                    translations[i], tgt_vocab, ignore_special_toks=True
                 )  # Convert indices to text
                 reference = tokens_to_string(
                     tgt[i], tgt_vocab, ignore_special_toks=True
@@ -166,9 +179,9 @@ def eval_model(model, tgt_vocab, test_dataloader, logger):
     # Compute BLEU (using torchtext or sacrebleu)
     bleu = bleu_score(hypotheses, references)
     for translation, ground_truth in zip(hypotheses, references):
-        logger.info(f"Translation: {translation}")
-        logger.info(f"Ground truth: {ground_truth}")
-    logger.info(f"BLEU score: {bleu*100:.2f}")
+        print(f"Translation: {translation}")
+        print(f"Ground truth: {ground_truth}")
+    print(f"BLEU score: {bleu*100:.2f}")
     return bleu
 
 
@@ -186,3 +199,45 @@ def plot_alignment(alignment, src_sentence, tgt_sentence, filename):
         plt.show()
     else:
         plt.savefig(filename)
+
+
+def greedy_translate(model, src, start_token, end_token, padding_token, max_len=50):
+    """
+    Perform greedy translation.
+    - src: Input source sequence tensor.
+    - src_mask: Mask for the source sequence.
+    - max_len: Maximum length of the generated translation.
+    - start_token: Index of the start-of-sequence token.
+    - end_token: Index of the end-of-sequence token.
+
+    Returns:
+    - translated_tokens: List of token indices for the generated translation.
+    """
+    model.eval()
+    with torch.no_grad():
+        # Encode the source sequence
+        src_mask = compute_src_mask(src, padding_token)
+        src_mask = src_mask.to(device)
+        enc_output = model.encode(src, src_mask)
+
+        # Initialize the target sequence with the start token
+        tgt = torch.full((1, 1), start_token).to(device)
+
+        for _ in range(max_len):
+            # Generate the next token
+            tgt_mask = future_mask(tgt.size(1))
+            tgt_mask = tgt_mask.to(device)
+            dec_output, attn_weights = model.decode(tgt, enc_output, tgt_mask, src_mask)
+            dec_output = model.output_layer(dec_output)
+            next_token = dec_output[:, -1, :].argmax(dim=-1).unsqueeze(1)
+
+            # Append the generated token to the target sequence
+            tgt = torch.cat([tgt, next_token], dim=1)
+
+            # Stop if the end token is generated
+            if next_token.item() == end_token:
+                break
+
+    # Convert tensor to list of token indices
+    translated_tokens = tgt.squeeze().tolist()
+    return translated_tokens, attn_weights
