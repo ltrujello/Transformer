@@ -311,7 +311,7 @@ class TrainWorker:
                     output.argmax(dim=-1)[j],
                     self.tgt_vocab,
                 )
-                greedy_translation = greedy_translate(
+                greedy_translation_tokens, _ = greedy_translate(
                     self.model,
                     src[j].unsqueeze(0),  # unsqueeze to add a batch dimension
                     self.start_idx,
@@ -320,7 +320,7 @@ class TrainWorker:
                     max_len=30,
                 )
                 greedy_translation = tokens_to_string(
-                    greedy_translation,
+                    greedy_translation_tokens,
                     self.tgt_vocab,
                 )
                 LOGGER.info(f"Input: {input_sentence}")
@@ -489,24 +489,16 @@ class TrainWorker:
                 self.end_idx,
             )
             src = src.to(device)
-            tgt = tgt.to(device)
-
-            # Forward pass
-            tgt_input = tgt[:, :-1]
-            src_mask = compute_src_mask(src, self.pad_idx)
-            tgt_mask = compute_tgt_mask(tgt_input, self.pad_idx)
-            src_mask = src_mask.to(device)
-            tgt_mask = tgt_mask.to(device)
-            output, attn_weights = self.model(src, tgt_input, tgt_mask, src_mask)
 
             # Plot attention and save to disk
             plot_attention(
-                attention_head_weights=attn_weights,
-                sentence_ind=0,
+                model=self.model,
+                src=src,
+                sentence_ind=idx,
                 layer=0,
                 attention_head=0,
-                src_sentence=tokens_to_string(src[0], self.src_vocab),
-                tgt_sentence=tokens_to_string(tgt[0], self.tgt_vocab),
+                src_vocab=self.src_vocab,
+                tgt_vocab=self.tgt_vocab,
                 filename=str(self.root / f"attention_sample_{idx}.png"),
             )
 
