@@ -2,7 +2,6 @@ import torch
 import argparse
 import torch.nn as nn
 import logging
-import sys
 import datetime
 from pathlib import Path
 from torch.utils.data import DataLoader, Dataset
@@ -17,13 +16,9 @@ from transformer.attention import compute_src_mask, compute_tgt_mask
 from typing import Optional
 import matplotlib.pyplot as plt
 from transformer.translation import eval_model, plot_attention, plot_alignment
-from transformer.utils import configure_device
-
+from transformer.utils import configure_device, configure_logging
 
 LOGGER = logging.getLogger(__name__)
-LOGGER_FMT = logging.Formatter(
-    "%(levelname)s:%(name)s [%(asctime)s] %(message)s", datefmt="%d/%b/%Y %H:%M:%S"
-)
 device = configure_device()
 
 
@@ -279,10 +274,6 @@ class TrainWorker:
         self.exp_head = exp_head
         self.run_experiment = run_experiment
 
-        if self.save_model_run and not self.root.exists():
-            LOGGER.info(f"Creating directory for model details with path {self.root=}")
-            self.root.mkdir()
-
         self.pad_idx: int = src_vocab["<blank>"]
         self.start_idx: int = src_vocab["<sos>"]
         self.end_idx: int = src_vocab["<eos>"]
@@ -534,40 +525,19 @@ def train_model(
     learning_rate: float,
     exp_layer: int,
     exp_head: int,
-    root: Optional[str],
+    model_dir: Optional[str],
     run_experiment: bool = False,
 ):
-    if not root:
-        model_name = create_model_name()
-    else:
-        root = Path(root)
-        if not root.exists():
-            root.mkdir()
-        model_name = root / create_model_name()
-
     if save_model_run:
-        # Create directory for the model
-        model_dir = Path(model_name)
-        if not model_dir.exists():
-            model_dir.mkdir()
-
-        # Attach fileHandler to logger and store logs in the model_dir
-        log_filename = f"{model_name}/training.log"
-        LOGGER.info(f"Saving logs to {log_filename=}")
-        file_handler = logging.FileHandler(log_filename)
-        file_handler.setLevel(logging.INFO)
-        file_handler.setFormatter(LOGGER_FMT)
-        LOGGER.addHandler(file_handler)
-
         # Write down the model description message in model_dir
         if message is not None:
-            notes_filename = f"{model_name}/notes.txt"
+            notes_filename = f"{model_dir}/notes.txt"
             LOGGER.info(f"Creating a notes file with {notes_filename=}")
             with open(notes_filename, "w") as f:
                 f.write(message)
 
     LOGGER.info(
-        f"Training model {model_name=} with {num_epochs=} {num_batches} "
+        f"Training model {model_dir=} with {num_epochs=} {num_batches} "
         f"{batch_size=} {eval_interval=} {checkpoint_every=} "
         f"{checkpoint_file=} {checkpoint_epochs=} {save_model_run=} "
         f"{run_eval_model=} {learning_rate=} {run_experiment=} "
@@ -635,7 +605,7 @@ def train_model(
         checkpoint_every=checkpoint_every,
         checkpoint_epochs=checkpoint_epochs,
         save_model_run=save_model_run,
-        root=model_name,
+        root=model_dir,
         run_experiment=run_experiment,
         exp_layer=exp_layer,
         exp_head=exp_head,
@@ -748,13 +718,24 @@ def main():
     )
 
     args = ap.parse_args()
-    if args.log_stdout:
-        # Create a stream handler for stdout
-        stream_handler = logging.StreamHandler(sys.stdout)
-        stream_handler.setLevel(args.log_level)
-        stream_handler.setFormatter(LOGGER_FMT)
-        LOGGER.addHandler(stream_handler)
-        LOGGER.setLevel(args.log_level)
+
+    if args.model_root:
+        # Create directory for model root
+        model_root = Path(args.model_root)
+        if not model_root.exists():
+            model_root.mkdir()
+        model_dir = model_root / create_model_name()
+
+        # Create directory for the model
+        if not model_dir.exists():
+            model_dir.mkdir()
+
+        # Create log file for this model and begin logging
+        log_filename = f"{model_dir}/training.log"
+        configure_logging(log_filename)
+        LOGGER.info(f"Saving logs to {log_filename=}")
+    else:
+        model_dir = None
 
     train_model(
         num_epochs=args.num_epochs,
@@ -771,7 +752,7 @@ def main():
         run_experiment=args.run_experiment,
         exp_layer=args.exp_layer,
         exp_head=args.exp_head,
-        root=args.model_root,
+        model_dir=model_dir,
     )
 
 

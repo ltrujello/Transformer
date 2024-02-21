@@ -5,7 +5,6 @@ from typing import Optional
 import logging
 from transformer.utils import configure_device
 
-
 LOGGER = logging.getLogger(__name__)
 device = configure_device()
 

@@ -8,10 +8,6 @@ from typing import Optional
 from transformer.utils import configure_device
 
 LOGGER = logging.getLogger(__name__)
-LOGGER_FMT = logging.Formatter(
-    "%(levelname)s:%(name)s [%(asctime)s] %(message)s", datefmt="%d/%b/%Y %H:%M:%S"
-)
-LOGGER.setLevel(logging.INFO)
 # device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
 device = configure_device()
 
@@ -81,12 +77,12 @@ def plot_attention(
     pad_idx = src_vocab["<blank>"]
     tgt_input, attention_head_weights = greedy_translate(
         model,
-        src[sentence_ind].unsqueeze(0),
+        src[0].unsqueeze(0),
         start_token=start_idx,
         end_token=end_idx,
         padding_token=pad_idx,
     )
-    src_sentence = [src_vocab.lookup_token(elem.item()) for elem in src[sentence_ind]]
+    src_sentence = [src_vocab.lookup_token(elem.item()) for elem in src[0]]
     tgt_sentence = [tgt_vocab.lookup_token(elem) for elem in tgt_input]
 
     plt.figure(figsize=(12, 10))
@@ -179,9 +175,9 @@ def eval_model(model, tgt_vocab, test_dataloader, logger=None):
     # Compute BLEU (using torchtext or sacrebleu)
     bleu = bleu_score(hypotheses, references)
     for translation, ground_truth in zip(hypotheses, references):
-        print(f"Translation: {translation}")
-        print(f"Ground truth: {ground_truth}")
-    print(f"BLEU score: {bleu*100:.2f}")
+        LOGGER.info(f"Translation: {translation}")
+        LOGGER.info(f"Ground truth: {ground_truth}")
+    LOGGER.info(f"BLEU score: {bleu*100:.2f}")
     return bleu
 
 
@@ -237,7 +233,6 @@ def greedy_translate(model, src, start_token, end_token, padding_token, max_len=
             # Stop if the end token is generated
             if next_token.item() == end_token:
                 break
-
     # Convert tensor to list of token indices
     translated_tokens = tgt.squeeze().tolist()
     return translated_tokens, attn_weights
