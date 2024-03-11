@@ -5,10 +5,13 @@ import sys
 
 from dotenv import load_dotenv
 
+LOGGER = logging.getLogger(__name__)
+
 
 def configure_device():
     load_dotenv()
     device = os.getenv("DEVICE", "cpu")
+    print(f"Attempting to use device {device=}")
     return torch.device(device)
 
 

@@ -152,8 +152,10 @@ def eval_model(model, tgt_vocab, test_dataloader, logger=None):
     pad_token = tgt_vocab["<blank>"]
 
     with torch.no_grad():
-        for src, tgt, _ in test_dataloader:
+        for src, tgt, _ in test_dataloader: 
             translations = []
+            src = src.to(device)
+            tgt = tgt.to(device)
             for elem in src:
                 translation, _ = greedy_translate(
                     model, elem.unsqueeze(0), start_token, end_token, pad_token

@@ -101,6 +101,10 @@ def build_dataloaders(
         if idx > num_batches * batch_size:
             break
         test_data.append((src_vocab(tokenizer(x)), tgt_vocab(tokenizer(y)), z))
+    
+    # Sort training data. Is this the best approach? 
+    training_data.sort(key=len)
+    test_data.sort(key=len)
 
     train_dataloader = DataLoader(
         training_data,
@@ -150,6 +154,25 @@ def compute_alignment_error(attn_weights, alignment, mse, layer, head):
         # Grab the attention matrix at layer 5, attention head 1
         first_attn_head = attn_weights[layer][elem][head]
         masked_attn_head = first_attn_head * alignment[elem]
+        loss += mse(alignment[elem], masked_attn_head)
+    return loss
+
+def compute_nn_alignment_error(attn_weights, alignment, mse):
+    """
+    attn_weights comes from decoder-encoder attention calculation.
+    It is assumed to be a list of shapes (batch_size, num_heads, tgt_seq_len - 1, src_seq_len).
+    The length of the list is the number of layers
+    Thus, alignment should have shape (batch_size, tgt_seq_len - 1, src_seq_len).
+
+    Note that we subtract 1 from tgt_seq_len because during training, we remove the
+    last column of tgt_seq_len before feeding it to the decoder.
+    """
+    loss = 0
+    # Traverse each sentence, translation pair, and compute alignment loss
+    for elem in range(len(alignment)):
+        # Compute the average attention across all heads in the first layer
+        avg_attn = attn_weights[2][elem].mean(dim=0)
+        masked_attn_head = avg_attn * alignment[elem]
         loss += mse(alignment[elem], masked_attn_head)
     return loss
 
@@ -351,9 +374,7 @@ class TrainWorker:
             )
             # Can we guide the attention of the Transformer?
             if self.run_experiment:
-                loss += compute_alignment_error(
-                    attn_weights, alignment, self.mse, self.exp_layer, self.exp_head
-                )
+                loss += compute_nn_alignment_error(attn_weights, alignment, self.mse)
 
             total_loss += loss.item()
 
